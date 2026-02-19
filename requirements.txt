@@ -1,0 +1,9 @@
+# Dependencies specific to Traccar/service.py
+# (not present in leonboe1/GoogleFindMyTools requirements.txt)
+#
+# In the Docker build these are appended to the base requirements.txt via:
+#   cat Traccar/requirements.txt >> requirements.txt
+#
+flask>=3.1.1
+requests>=2.32.3
+python-dotenv>=1.0.0

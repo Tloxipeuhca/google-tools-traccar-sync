@@ -1,0 +1,33 @@
+# =============================================================================
+# GoogleFindMyTools – Traccar sync service
+#
+# Prerequisites:
+#   1. Generate Auth/secrets.json first (see README.md, step 2)
+#   2. Copy .env.example to .env (in this directory) and fill in the values
+#
+# Usage (run from the Traccar/ directory):
+#   docker compose up -d            # build image and start in background
+#   docker compose logs -f          # stream logs
+#   docker compose down             # stop
+# =============================================================================
+
+services:
+  traccar-sync:
+    build: .                        # Dockerfile clones both repos automatically
+    container_name: traccar-sync
+    ports:
+      - "${PORT:-5001}:5001"
+    environment:
+      # URL of your Traccar server – override in .env or with -e
+      TRACCAR_SERVER_URL: "${TRACCAR_SERVER_URL:-http://traccar:8082}"
+      PORT: "5001"
+      # Bearer token for API authentication – leave empty to disable
+      API_TOKEN: "${API_TOKEN:-}"
+    volumes:
+      # Google Find My credentials – generated once with: docker compose run traccar-sync python main.py
+      - ../Auth:/app/Auth
+      # Persistent runtime data (services.json, devices.json, locations.json)
+      - ../Data:/app/Data
+      # Log files
+      - ../logs:/app/logs
+    restart: unless-stopped
