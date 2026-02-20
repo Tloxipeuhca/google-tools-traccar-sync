@@ -51,6 +51,22 @@ load_dotenv(
 # Logging
 # ---------------------------------------------------------------------------
 
+class _ColorFormatter(logging.Formatter):
+    """Console formatter that colorizes log lines by level using ANSI codes."""
+    _COLORS = {
+        logging.DEBUG:    '\033[36m',    # cyan
+        logging.WARNING:  '\033[33m',    # yellow
+        logging.ERROR:    '\033[31m',    # red
+        logging.CRITICAL: '\033[1;31m',  # bold red
+    }
+    _RESET = '\033[0m'
+
+    def format(self, record: logging.LogRecord) -> str:
+        color = self._COLORS.get(record.levelno, '')
+        msg = super().format(record)
+        return f'{color}{msg}{self._RESET}' if color else msg
+
+
 def _setup_logging() -> logging.Logger:
     """Configures file + console logging in UTF-8, compatible with Windows."""
     log_dir = os.path.join(_PROJECT_ROOT, 'logs')
@@ -58,22 +74,20 @@ def _setup_logging() -> logging.Logger:
 
     log_file = os.path.join(log_dir, f"{date.today().strftime('%Y-%m-%d')}_service.log")
 
-    formatter = logging.Formatter(
-        fmt='%(asctime)s.%(msecs)03d [%(levelname)-8s] %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-    )
+    _fmt     = '%(asctime)s.%(msecs)03d [%(levelname)-8s] %(message)s'
+    _datefmt = '%Y-%m-%d %H:%M:%S'
 
-    # File handler – UTF-8
+    # File handler – plain text, UTF-8
     file_handler = logging.FileHandler(log_file, encoding='utf-8')
-    file_handler.setFormatter(formatter)
+    file_handler.setFormatter(logging.Formatter(fmt=_fmt, datefmt=_datefmt))
 
-    # Console handler – wrap stdout in UTF-8 for Windows compatibility
+    # Console handler – colored output, UTF-8 for Windows compatibility
     if hasattr(sys.stdout, 'buffer'):
         utf8_stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
     else:
         utf8_stdout = sys.stdout
     console_handler = logging.StreamHandler(utf8_stdout)
-    console_handler.setFormatter(formatter)
+    console_handler.setFormatter(_ColorFormatter(fmt=_fmt, datefmt=_datefmt))
 
     log = logging.getLogger('traccar_service')
     log.setLevel(logging.DEBUG)
