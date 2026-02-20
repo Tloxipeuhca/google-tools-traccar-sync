@@ -23,6 +23,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
     && rm -rf /var/lib/apt/lists/*
 
+# Pass --build-arg CACHEBUST=$(date +%s) to force re-cloning without rebuilding earlier layers
+ARG CACHEBUST=1
+
 # 1. Clone GoogleFindMyTools – provides NovaApi, ProtoDecoders, main.py, …
 RUN git clone --depth 1 https://github.com/leonboe1/GoogleFindMyTools.git .
 
@@ -51,16 +54,16 @@ exec "$@"\n' > /usr/local/bin/docker-entrypoint.sh \
 # Pre-create runtime directories; they will be overridden by bind-mounts at run time
 RUN mkdir -p Data logs
 
-EXPOSE 5001
+EXPOSE 5002
 
 # Keep Python output unbuffered so logs appear immediately in docker logs
 ENV PYTHONUNBUFFERED=1
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python -c "import urllib.request,os; urllib.request.urlopen('http://localhost:'+os.environ.get('PORT','5001')+'/health')" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:${PORT:-5002}/health')" || exit 1
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 # TRACCAR_SERVER_URL and PORT are injected at runtime via environment variables
 # (see docker-compose.yml or pass -e flags to docker run)
-CMD ["sh", "-c", "python -m Traccar.service --server-url \"${TRACCAR_SERVER_URL}\" --port \"${PORT:-5001}\""]
+CMD ["sh", "-c", "python -m Traccar.service --server-url \"${TRACCAR_SERVER_URL}\" --port \"${PORT:-5002}\""]

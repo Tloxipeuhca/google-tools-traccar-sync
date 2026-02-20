@@ -116,7 +116,7 @@ def _log_request():
 
 @app.before_request
 def _check_auth():
-    if flask_request.path == '/health':
+    if flask_request.endpoint == 'route_health':
         return  # health endpoint is always public
     if not _API_TOKEN:
         return  # authentication disabled (API_TOKEN not set)
@@ -132,7 +132,7 @@ def _check_auth():
 @app.route('/health', methods=['GET'])
 def route_health():
     """Lightweight liveness probe — always public, no external calls."""
-    return jsonify({'status': 'ok', 'services': len(_load_services())})
+    return jsonify({'status': 'ok', 'services': len(_service_threads)})
 
 
 @app.after_request

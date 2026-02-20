@@ -4,7 +4,7 @@
 
 set -e
 
-BASE_URL="https://raw.githubusercontent.com/Tloxipeuhca/google-tools-traccar-sync/main/Traccar"
+BASE_URL="https://raw.githubusercontent.com/Tloxipeuhca/google-tools-traccar-sync/main"
 
 echo "==> Downloading latest deployment files..."
 curl -sSfLO "${BASE_URL}/Dockerfile"
@@ -13,7 +13,8 @@ curl -sSfLO "${BASE_URL}/deploy.sh"
 chmod +x deploy.sh
 
 echo "==> Rebuilding image and restarting service..."
-docker compose up --build -d
+docker compose build --build-arg CACHEBUST="$(date +%s)"
+docker compose up -d
 
 echo "==> Last 30 log lines:"
 docker compose logs --tail=30
