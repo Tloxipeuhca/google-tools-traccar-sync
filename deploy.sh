@@ -9,8 +9,7 @@ BASE_URL="https://raw.githubusercontent.com/Tloxipeuhca/google-tools-traccar-syn
 echo "==> Downloading latest deployment files..."
 curl -sSfLO "${BASE_URL}/Dockerfile"
 curl -sSfLO "${BASE_URL}/docker-compose.yml"
-curl -sSfLO "${BASE_URL}/deploy.sh"
-chmod +x deploy.sh
+curl -sSfLO "${BASE_URL}/.env.example"
 
 echo "==> Rebuilding image and restarting service..."
 docker compose build --build-arg CACHEBUST="$(date +%s)"

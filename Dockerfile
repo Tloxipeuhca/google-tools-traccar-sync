@@ -31,7 +31,11 @@ RUN git clone --depth 1 https://github.com/leonboe1/GoogleFindMyTools.git .
 
 # 2. Clone the Traccar sync module and overlay it on the base project
 RUN git clone --depth 1 https://github.com/Tloxipeuhca/google-tools-traccar-sync.git /app/Traccar \
-    && sort -u /app/requirements.txt /app/Traccar/requirements.txt -o /app/requirements.txt
+    && sort -u /app/requirements.txt /app/Traccar/requirements.txt -o /app/requirements.txt \
+    && printf '{"version":"%s","built_at":"%s"}\n' \
+        "$(cd /app/Traccar && git rev-parse --short HEAD)" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        > /app/Traccar/_build_info.json
 
 # Install all Python dependencies (merged base + Traccar requirements)
 RUN pip install --no-cache-dir -r requirements.txt

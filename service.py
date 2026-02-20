@@ -79,6 +79,13 @@ def _setup_logging() -> logging.Logger:
     log.setLevel(logging.DEBUG)
     log.addHandler(file_handler)
     log.addHandler(console_handler)
+
+    # Suppress werkzeug access-log lines for /health (healthcheck noise every 30 s)
+    class _NoHealthFilter(logging.Filter):
+        def filter(self, record):
+            return '/health' not in record.getMessage()
+    logging.getLogger('werkzeug').addFilter(_NoHealthFilter())
+
     return log
 
 
@@ -116,8 +123,8 @@ def _log_request():
 
 @app.before_request
 def _check_auth():
-    if flask_request.endpoint == 'route_health':
-        return  # health endpoint is always public
+    if flask_request.endpoint in ('route_health', 'route_versions'):
+        return  # public endpoints — no auth required
     if not _API_TOKEN:
         return  # authentication disabled (API_TOKEN not set)
     auth = flask_request.headers.get('Authorization', '')
@@ -133,6 +140,19 @@ def _check_auth():
 def route_health():
     """Lightweight liveness probe — always public, no external calls."""
     return jsonify({'status': 'ok', 'services': len(_service_threads)})
+
+
+_BUILD_INFO_FILE = os.path.join(os.path.dirname(__file__), '_build_info.json')
+
+@app.route('/versions', methods=['GET'])
+def route_versions():
+    """Returns the service version (git commit) and build date — always public."""
+    try:
+        with open(_BUILD_INFO_FILE) as f:
+            info = json.load(f)
+    except (FileNotFoundError, ValueError):
+        info = {'version': 'dev', 'built_at': None}
+    return jsonify(info)
 
 
 @app.after_request

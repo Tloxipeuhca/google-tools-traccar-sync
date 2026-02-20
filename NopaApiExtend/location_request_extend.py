@@ -8,8 +8,11 @@
 #
 
 import hashlib
+import logging
 import threading
 import time
+
+logger = logging.getLogger('traccar_service')
 
 from Auth.fcm_receiver import FcmReceiver
 
@@ -123,7 +126,7 @@ def get_location_data_for_device_extended(canonic_device_id: str, name: str = "D
         Liste de dicts de locations (vide si aucune location disponible).
     """
     with _location_request_lock:
-        print(f"[LocationRequest] Requesting location data for {name}...")
+        logger.info(f"[LocationRequest] Requesting location data for {name}...")
 
         result       = None
         request_uuid = generate_random_uuid()
@@ -132,7 +135,7 @@ def get_location_data_for_device_extended(canonic_device_id: str, name: str = "D
             nonlocal result
             device_update = parse_device_update_protobuf(response)
             if device_update.fcmMetadata.requestUuid == request_uuid:
-                print("[LocationRequest] Location request successful.")
+                logger.info("[LocationRequest] Location request successful.")
                 result = parse_device_update_protobuf(response)
 
         fcm_token   = FcmReceiver().register_for_location_updates(handle_location_response)
