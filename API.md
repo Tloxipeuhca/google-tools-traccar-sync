@@ -1,6 +1,6 @@
 # API Reference – Traccar Sync Microservice
 
-Complete reference for all REST endpoints exposed by the Flask service on port `5001`.
+Complete reference for all REST endpoints exposed by the Flask service on port `5002`.
 
 ---
 
@@ -17,7 +17,7 @@ API_TOKEN=change-me-to-a-strong-random-secret
 Pass the token in every request:
 
 ```bash
-curl -H "Authorization: Bearer <token>" http://localhost:5001/devices
+curl -H "Authorization: Bearer <token>" http://localhost:5002/devices
 ```
 
 | Behaviour | Condition |
@@ -66,9 +66,10 @@ python -c "import secrets; print(secrets.token_hex(32))"
 
 ```json
 {
-  "device_id": "canonic_device_id",
-  "timer":     60,
-  "delta":     5
+  "id":    "canonic_device_id",
+  "name":  "Device Name",
+  "timer": 60,
+  "delta": 5
 }
 ```
 
@@ -120,7 +121,7 @@ Returns the list of registered Find My trackers.
 **Response** – array of [Device](#device)
 
 ```bash
-curl http://localhost:5001/devices
+curl http://localhost:5002/devices
 ```
 
 ---
@@ -132,7 +133,7 @@ Returns **all available** locations for a device.
 **Response** – array of [Location](#location)
 
 ```bash
-curl http://localhost:5001/devices/abc123/locations
+curl http://localhost:5002/devices/abc123/locations
 ```
 
 ---
@@ -144,7 +145,7 @@ Returns only the **most recent** location for a device.
 **Response** – [Location](#location) — `404` if no locations available
 
 ```bash
-curl http://localhost:5001/devices/abc123/locations?last
+curl http://localhost:5002/devices/abc123/locations?last
 ```
 
 ---
@@ -158,7 +159,7 @@ Returns all registered periodic sync services.
 **Response** – array of [Service](#service)
 
 ```bash
-curl http://localhost:5001/services
+curl http://localhost:5002/services
 ```
 
 ---
@@ -170,7 +171,7 @@ Returns the sync service registered for a specific device.
 **Response** – [Service](#service) — `404` if none registered
 
 ```bash
-curl http://localhost:5001/devices/abc123/services
+curl http://localhost:5002/devices/abc123/services
 ```
 
 ---
@@ -187,7 +188,7 @@ Returns `403 Forbidden` if the device is present in `Data/excluded_devices.json`
 **Response** – [Service](#service) — `201 Created` on insert, `200 OK` on update
 
 ```bash
-curl -X PUT http://localhost:5001/devices/abc123/services \
+curl -X PUT http://localhost:5002/devices/abc123/services \
   -H 'Content-Type: application/json' \
   -d '{"timer": 120, "delta": 10}'
 ```
@@ -201,7 +202,7 @@ Stops and removes the periodic sync service for a device.
 **Response** – `{"status": "deleted"}`
 
 ```bash
-curl -X DELETE http://localhost:5001/devices/abc123/services
+curl -X DELETE http://localhost:5002/devices/abc123/services
 ```
 
 ---
@@ -227,7 +228,7 @@ Full sync pipeline for a device:
 ```
 
 ```bash
-curl -X PUT http://localhost:5001/traccar/devices/abc123/locations
+curl -X PUT http://localhost:5002/traccar/devices/abc123/locations
 ```
 
 ---
@@ -241,7 +242,7 @@ Pushes a single Location resource (supplied in the request body) to the Traccar 
 **Response** – `{"status": "ok"}` on success
 
 ```bash
-curl -X PUT http://localhost:5001/traccar/devices/abc123/locations?single \
+curl -X PUT http://localhost:5002/traccar/devices/abc123/locations?single \
   -H 'Content-Type: application/json' \
   -d '{"id":"abc123","lat":48.8566,"lon":2.3522,"timestamp":1700000000}'
 ```
@@ -258,7 +259,7 @@ Returns the **most recent live location** for every registered Find My tracker
 **Response** – array of [Location](#location)
 
 ```bash
-curl http://localhost:5001/locations
+curl http://localhost:5002/locations
 ```
 
 ---
@@ -274,7 +275,7 @@ Filters a JSON-encoded array of Location resources and returns only those
 
 ```bash
 # URL-encode the JSON list before passing it as a query param
-curl "http://localhost:5001/locations?filter=%5B%7B%22id%22%3A%22abc123%22%2C%22lat%22%3A48.8%2C%22lon%22%3A2.3%2C%22timestamp%22%3A1700000000%7D%5D"
+curl "http://localhost:5002/locations?filter=%5B%7B%22id%22%3A%22abc123%22%2C%22lat%22%3A48.8%2C%22lon%22%3A2.3%2C%22timestamp%22%3A1700000000%7D%5D"
 ```
 
 ---
@@ -288,7 +289,7 @@ Records a location as synced in `locations.json` (stores its MD5 hash).
 **Response** – `{"status": "saved", "hash": "<md5>"}` — `201 Created`
 
 ```bash
-curl -X POST http://localhost:5001/locations \
+curl -X POST http://localhost:5002/locations \
   -H 'Content-Type: application/json' \
   -d '{"id":"abc123","lat":48.8566,"lon":2.3522,"timestamp":1700000000}'
 ```
@@ -302,7 +303,7 @@ Returns the list of device IDs excluded from auto-registration, enriched with th
 **Response** – array of `{"id": "...", "name": "..."}`
 
 ```bash
-curl http://localhost:5001/excluded-devices
+curl http://localhost:5002/excluded-devices
 ```
 
 ---
@@ -311,10 +312,10 @@ curl http://localhost:5001/excluded-devices
 
 Adds a device to the exclusion list. If a sync service is currently running for that device, it is stopped and removed from `services.json` immediately.
 
-**Response** – `{"device_id": "...", "excluded": true}` — `201 Created` on insert, `200 OK` if already excluded
+**Response** – `{"id": "...", "excluded": true}` — `201 Created` on insert, `200 OK` if already excluded
 
 ```bash
-curl -X PUT http://localhost:5001/excluded-devices/abc123
+curl -X PUT http://localhost:5002/excluded-devices/abc123
 ```
 
 ---
@@ -323,10 +324,10 @@ curl -X PUT http://localhost:5001/excluded-devices/abc123
 
 Removes a device from the exclusion list. The auto-register thread will pick it up again on the next cycle.
 
-**Response** – `{"device_id": "...", "excluded": false}` — `404` if not in the list
+**Response** – `{"id": "...", "excluded": false}` — `404` if not in the list
 
 ```bash
-curl -X DELETE http://localhost:5001/excluded-devices/abc123
+curl -X DELETE http://localhost:5002/excluded-devices/abc123
 ```
 
 ---
@@ -345,7 +346,7 @@ The feature is controlled by four environment variables:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `AUTO_REGISTER_SERVICES` | `true` | Set to `false` to disable the feature entirely |
-| `AUTO_REGISTER_TIMER` | `60` | Sync interval (seconds) used when creating the service |
+| `AUTO_REGISTER_TIMER` | `600` | Sync interval (seconds) used when creating the service |
 | `AUTO_REGISTER_DELTA` | `5` | Jitter (seconds) used when creating the service |
 
 The exclusion list is managed at runtime via the [Excluded devices](#excluded-devices) CRUD endpoints
@@ -415,7 +416,7 @@ Google Find My API
 NopaApiExtend.get_location_data_for_device_extended()
         │  (FCM push ← Nova API)
         ▼
-   service.py  (Flask, port 5001)
+   service.py  (Flask, port 5002)
         │
         ├── GET  /devices                         → list trackers
         ├── GET  /devices/<id>/locations          → all locations

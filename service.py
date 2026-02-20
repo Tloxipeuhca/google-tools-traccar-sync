@@ -5,9 +5,9 @@
 #  with a self-hosted Traccar GPS tracking server.
 #
 #  Usage:
-#      python -m Traccar.service --server-url http://localhost:8082 --port 5001
+#      python -m Traccar.service --server-url http://localhost:8082 --port 5002
 #  or:
-#      python Traccar/service.py  --server-url http://localhost:8082 --port 5001
+#      python Traccar/service.py  --server-url http://localhost:8082 --port 5002
 #
 
 import sys
@@ -59,7 +59,7 @@ def _setup_logging() -> logging.Logger:
     log_file = os.path.join(log_dir, f"{date.today().strftime('%Y-%m-%d')}_service.log")
 
     formatter = logging.Formatter(
-        fmt='%(asctime)s [%(levelname)-8s] %(message)s',
+        fmt='%(asctime)s.%(msecs)03d [%(levelname)-8s] %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S',
     )
 
@@ -103,7 +103,7 @@ _API_TOKEN: str | None = os.environ.get('API_TOKEN') or None
 # Auto-registration config – read once at startup from environment
 # ---------------------------------------------------------------------------
 _AUTO_REGISTER: bool = os.environ.get('AUTO_REGISTER_SERVICES', 'true').strip().lower() not in ('0', 'false', 'no')
-_AUTO_REGISTER_TIMER: int = int(os.environ.get('AUTO_REGISTER_TIMER', '60'))
+_AUTO_REGISTER_TIMER: int = int(os.environ.get('AUTO_REGISTER_TIMER', '120'))
 _AUTO_REGISTER_DELTA: int = int(os.environ.get('AUTO_REGISTER_DELTA', '5'))
 
 
@@ -116,6 +116,8 @@ def _log_request():
 
 @app.before_request
 def _check_auth():
+    if flask_request.path == '/health':
+        return  # health endpoint is always public
     if not _API_TOKEN:
         return  # authentication disabled (API_TOKEN not set)
     auth = flask_request.headers.get('Authorization', '')
@@ -125,6 +127,12 @@ def _check_auth():
             f" from {flask_request.remote_addr}"
         )
         return jsonify({'error': 'Unauthorized'}), 401
+
+
+@app.route('/health', methods=['GET'])
+def route_health():
+    """Lightweight liveness probe — always public, no external calls."""
+    return jsonify({'status': 'ok', 'services': len(_load_services())})
 
 
 @app.after_request
@@ -171,11 +179,19 @@ def _load_services() -> list:
         return []
     with open(_SERVICES_FILE, 'r') as f:
         services = json.load(f)
-    # Backfill delta=5 for legacy entries that pre-date the field
     needs_save = False
     for svc in services:
+        # Migrate legacy device_id → id
+        if 'device_id' in svc and 'id' not in svc:
+            svc['id'] = svc.pop('device_id')
+            needs_save = True
+        # Backfill delta=5 for legacy entries that pre-date the field
         if 'delta' not in svc:
             svc['delta'] = 5
+            needs_save = True
+        # Backfill name from devices cache
+        if 'name' not in svc:
+            svc['name'] = _load_device_name(svc['id'])
             needs_save = True
     if needs_save:
         _save_services(services)
@@ -274,7 +290,7 @@ def _to_location_resource(device_id: str, loc: dict) -> dict:
 
 def _fetch_device_locations(device_id: str) -> list:
     """Calls get_location_data_for_device_extended and returns Location resources."""
-    raw = get_location_data_for_device_extended(device_id, "Device")
+    raw = get_location_data_for_device_extended(device_id, _load_device_name(device_id) or device_id)
     # Keep only geo locations (semantic locations have no lat/lon)
     return [_to_location_resource(device_id, loc) for loc in raw if 'latitude' in loc]
 
@@ -431,13 +447,14 @@ def route_list_services():
     now      = datetime.now().timestamp()
     result   = []
     for svc in services:
-        did       = svc['device_id']
+        did       = svc['id']
         last_sync = _service_last_sync.get(did)
         next_sync = _service_next_sync.get(did)
         last_sync_str     = datetime.fromtimestamp(last_sync).strftime('%Y-%m-%d %H:%M:%S') if last_sync else None
         next_refresh_in_s = max(0, round(next_sync - now)) if next_sync else 0
         result.append({
             **svc,
+            'name':              _load_device_name(did),
             'last_sync':         last_sync_str,
             'next_refresh_in_s': next_refresh_in_s,
         })
@@ -452,12 +469,12 @@ def route_list_services():
 def route_get_device_service(device_id):
     """Returns the sync service registered for a specific device."""
     services = _load_services()
-    svc = next((s for s in services if s['device_id'] == device_id), None)
+    svc = next((s for s in services if s['id'] == device_id), None)
     if svc is None:
         logger.warning(f"[GET /devices/{device_id}/services] Service not found")
         return jsonify({'error': 'Service not found'}), 404
     logger.info(f"[GET /devices/{device_id}/services] timer={svc['timer']}s")
-    return jsonify(svc)
+    return jsonify({**svc, 'name': _load_device_name(device_id)})
 
 
 # ---------------------------------------------------------------------------
@@ -475,18 +492,20 @@ def route_put_device_service(device_id):
     delta = int(data.get('delta', 5))
     services = _load_services()
     for svc in services:
-        if svc['device_id'] == device_id:
+        if svc['id'] == device_id:
             svc['timer'] = timer
             svc['delta'] = delta
+            svc['name']  = _load_device_name(device_id)
             _save_services(services)
-            _start_device_service(device_id, timer, delta)
+            _start_device_service(device_id, svc['name'], timer, delta)
             logger.info(f"[PUT /devices/{device_id}/service] Updated timer={timer}s delta=±{delta}s")
-            return jsonify({'device_id': device_id, 'timer': timer, 'delta': delta})
-    services.append({'device_id': device_id, 'timer': timer, 'delta': delta})
+            return jsonify({'id': device_id, 'name': svc['name'], 'timer': timer, 'delta': delta})
+    name = _load_device_name(device_id)
+    services.append({'id': device_id, 'name': name, 'timer': timer, 'delta': delta})
     _save_services(services)
-    _start_device_service(device_id, timer, delta)
+    _start_device_service(device_id, name, timer, delta)
     logger.info(f"[PUT /devices/{device_id}/service] Created timer={timer}s delta=±{delta}s")
-    return jsonify({'device_id': device_id, 'timer': timer, 'delta': delta}), 201
+    return jsonify({'id': device_id, 'name': name, 'timer': timer, 'delta': delta}), 201
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +516,7 @@ def route_put_device_service(device_id):
 def route_delete_device_service(device_id):
     """Stops and removes a periodic sync service for a device."""
     services     = _load_services()
-    new_services = [s for s in services if s['device_id'] != device_id]
+    new_services = [s for s in services if s['id'] != device_id]
     if len(new_services) == len(services):
         logger.warning(f"[DELETE /devices/{device_id}/service] Service not found")
         return jsonify({'error': 'Service not found'}), 404
@@ -529,14 +548,14 @@ def route_put_excluded_device(device_id):
     excluded.add(device_id)
     _save_excluded_devices(excluded)
     services = _load_services()
-    had_service = any(s['device_id'] == device_id for s in services)
+    had_service = any(s['id'] == device_id for s in services)
     if had_service:
-        _save_services([s for s in services if s['device_id'] != device_id])
+        _save_services([s for s in services if s['id'] != device_id])
         _stop_device_service(device_id)
         logger.info(f"[PUT /excluded-devices/{device_id}] Excluded — service stopped")
     else:
         logger.info(f"[PUT /excluded-devices/{device_id}] Excluded — no active service")
-    return jsonify({'device_id': device_id, 'excluded': True}), (200 if already else 201)
+    return jsonify({'id': device_id, 'excluded': True}), (200 if already else 201)
 
 
 @app.route('/excluded-devices/<device_id>', methods=['DELETE'])
@@ -549,7 +568,7 @@ def route_delete_excluded_device(device_id):
     excluded.discard(device_id)
     _save_excluded_devices(excluded)
     logger.info(f"[DELETE /excluded-devices/{device_id}] Removed from exclusion list")
-    return jsonify({'device_id': device_id, 'excluded': False})
+    return jsonify({'id': device_id, 'excluded': False})
 
 
 # ---------------------------------------------------------------------------
@@ -620,13 +639,14 @@ def route_add_location():
 # 4.10  Background periodic sync service
 # ---------------------------------------------------------------------------
 
-def _sync_device(device_id: str) -> None:
+def _sync_device(device_id: str, name: str) -> None:
     """Runs one sync cycle for a device (replicates task 4.5 logic)."""
-    logger.info(f"[sync:{device_id}] Cycle starting...")
+    tag = f"[sync] {name} ({device_id})"
+    logger.info(f"{tag} Cycle starting...")
     locations = _fetch_device_locations(device_id)
-    logger.info(f"[sync:{device_id}] {len(locations)} location(s) fetched from Google Find My")
+    logger.info(f"{tag} {len(locations)} location(s) fetched from Google Find My")
     new_locations = _get_new_locations(device_id, locations)
-    logger.info(f"[sync:{device_id}] {len(new_locations)} new (not yet synced to Traccar)")
+    logger.info(f"{tag} {len(new_locations)} new (not yet synced to Traccar)")
     synced = 0
     failed = 0
     for loc in new_locations:
@@ -634,47 +654,48 @@ def _sync_device(device_id: str) -> None:
         _append_location_log(loc, http_status)
         if ok:
             _persist_location(loc)
-            logger.info(f"[sync:{device_id}]   ✓ ts={loc['timestamp']}")
+            logger.info(f"{tag}   ✓ ts={loc['timestamp']}")
             synced += 1
         else:
-            logger.error(f"[sync:{device_id}]   ✗ ts={loc['timestamp']}  reason={msg}")
+            logger.error(f"{tag}   ✗ ts={loc['timestamp']}  reason={msg}")
             failed += 1
     _service_last_sync[device_id] = datetime.now().timestamp()
     if new_locations:
-        logger.info(f"[sync:{device_id}] Cycle done — {synced} synced, {failed} failed")
+        logger.info(f"{tag} Cycle done — {synced} synced, {failed} failed")
     else:
-        logger.info(f"[sync:{device_id}] Cycle done — nothing new to sync")
+        logger.info(f"{tag} Cycle done — nothing new to sync")
 
 
-def _run_device_service(device_id: str, timer: int, delta: int, stop_event: threading.Event) -> None:
+def _run_device_service(device_id: str, name: str, timer: int, delta: int, stop_event: threading.Event) -> None:
     """Worker thread: runs immediately then waits `timer ± random(delta)` seconds between cycles."""
+    tag   = f"[service] {name} ({device_id})"
     cycle = 0
     while True:
         if stop_event.is_set():
-            logger.info(f"[service:{device_id}] Stop signal received, exiting thread")
+            logger.info(f"{tag} Stop signal received, exiting thread")
             break
         cycle += 1
-        logger.info(f"[service:{device_id}] --- Cycle #{cycle} ---")
+        logger.info(f"{tag} --- Cycle #{cycle} ---")
         try:
-            _sync_device(device_id)
+            _sync_device(device_id, name)
         except Exception as exc:
-            logger.error(f"[service:{device_id}] Unhandled error in cycle #{cycle}: {exc}")
+            logger.error(f"{tag} Unhandled error in cycle #{cycle}: {exc}")
         jitter = random.uniform(-delta, delta)
         wait   = max(0, timer + jitter)
         _service_next_sync[device_id] = datetime.now().timestamp() + wait
-        logger.info(f"[service:{device_id}] Sleeping {wait:.1f}s (base={timer}s jitter={jitter:+.1f}s)")
+        logger.info(f"{tag} Sleeping {wait:.1f}s (base={timer}s jitter={jitter:+.1f}s)")
         if stop_event.wait(wait):
-            logger.info(f"[service:{device_id}] Stop signal received during sleep, exiting thread")
+            logger.info(f"{tag} Stop signal received during sleep, exiting thread")
             break
 
 
-def _start_device_service(device_id: str, timer: int, delta: int = 5) -> None:
+def _start_device_service(device_id: str, name: str, timer: int, delta: int = 5) -> None:
     """Starts (or restarts) the background sync thread for a device."""
     _stop_device_service(device_id)
     stop_event = threading.Event()
     thread = threading.Thread(
         target=_run_device_service,
-        args=(device_id, timer, delta, stop_event),
+        args=(device_id, name, timer, delta, stop_event),
         daemon=True,
         name=f"traccar-service-{device_id}",
     )
@@ -734,7 +755,7 @@ def _auto_register_services() -> None:
         return
     excluded     = _load_excluded_devices()
     services     = _load_services()
-    registered   = {s['device_id'] for s in services}
+    registered   = {s['id'] for s in services}
     new_count    = 0
     for dev in devices:
         did  = dev['id']
@@ -745,10 +766,10 @@ def _auto_register_services() -> None:
         if did in registered:
             logger.debug(f"[auto-register] {name} ({did}) — already registered")
             continue
-        services.append({'device_id': did, 'timer': _AUTO_REGISTER_TIMER, 'delta': _AUTO_REGISTER_DELTA})
+        services.append({'id': did, 'name': name, 'timer': _AUTO_REGISTER_TIMER, 'delta': _AUTO_REGISTER_DELTA})
         _save_services(services)
         registered.add(did)
-        _start_device_service(did, _AUTO_REGISTER_TIMER, _AUTO_REGISTER_DELTA)
+        _start_device_service(did, name, _AUTO_REGISTER_TIMER, _AUTO_REGISTER_DELTA)
         logger.info(f"[auto-register] {name} ({did}) — registered timer={_AUTO_REGISTER_TIMER}s delta=±{_AUTO_REGISTER_DELTA}s")
         new_count += 1
     if new_count == 0:
@@ -799,14 +820,14 @@ def _enforce_exclusions() -> None:
     if not excluded:
         return
     services   = _load_services()
-    to_remove  = [s for s in services if s['device_id'] in excluded]
+    to_remove  = [s for s in services if s['id'] in excluded]
     if not to_remove:
         return
     for svc in to_remove:
-        did = svc['device_id']
+        did = svc['id']
         _stop_device_service(did)
         logger.info(f"[exclusions] Stopped service for excluded device {did}")
-    _save_services([s for s in services if s['device_id'] not in excluded])
+    _save_services([s for s in services if s['id'] not in excluded])
     logger.info(f"[exclusions] Removed {len(to_remove)} excluded service(s)")
 
 
@@ -816,8 +837,9 @@ def _start_all_services() -> None:
     logger.info(f"[startup] Loading {len(services)} service(s) from {_SERVICES_FILE}")
     for svc in services:
         delta = svc.get('delta', 5)
-        logger.info(f"[startup]   → device={svc['device_id']}  timer={svc['timer']}s  delta=±{delta}s")
-        _start_device_service(svc['device_id'], svc['timer'], delta)
+        name  = svc.get('name') or svc['id']
+        logger.info(f"[startup]   → {name} ({svc['id']})  timer={svc['timer']}s  delta=±{delta}s")
+        _start_device_service(svc['id'], name, svc['timer'], delta)
     if not services:
         logger.info("[startup] No services to restore")
 
@@ -837,8 +859,8 @@ if __name__ == '__main__':
     parser.add_argument(
         '--port',
         type=int,
-        default=int(os.environ.get('PORT', 5001)),
-        help='Port to expose the Flask service on (env: PORT, default: 5001)',
+        default=int(os.environ.get('PORT', 5002)),
+        help='Port to expose the Flask service on (env: PORT, default: 5002)',
     )
     args = parser.parse_args()
 

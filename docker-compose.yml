@@ -16,16 +16,21 @@ services:
     build: .                        # Dockerfile clones both repos automatically
     container_name: traccar-sync
     ports:
-      - "${PORT:-5001}:5001"
+      - "${PORT:-5002}:${PORT:-5002}"
     environment:
       # URL of your Traccar server – override in .env or with -e
       TRACCAR_SERVER_URL: "${TRACCAR_SERVER_URL:-http://traccar:8082}"
-      PORT: "5001"
+      PORT: "${PORT:-5002}"
       # Bearer token for API authentication – leave empty to disable
       API_TOKEN: "${API_TOKEN:-}"
+      # Auto-registration settings
+      AUTO_REGISTER_SERVICES: "${AUTO_REGISTER_SERVICES:-true}"
+      AUTO_REGISTER_TIMER: "${AUTO_REGISTER_TIMER:-600}"
+      AUTO_REGISTER_DELTA: "${AUTO_REGISTER_DELTA:-5}"
     volumes:
       # Google Find My credentials – generated once with: docker compose run traccar-sync python main.py
-      - ./Auth:/app/Auth
+      # Mount only the credentials file (not the whole Auth/ dir) to keep Auth Python code intact
+      - ./Auth/secrets.json:/app/Auth/secrets.json
       # Persistent runtime data (services.json, devices.json, locations.json)
       - ./Data:/app/Data
       # Log files

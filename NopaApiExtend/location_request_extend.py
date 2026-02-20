@@ -139,7 +139,13 @@ def get_location_data_for_device_extended(canonic_device_id: str, name: str = "D
         hex_payload = create_location_request(canonic_device_id, fcm_token, request_uuid)
         nova_request(NOVA_ACTION_API_SCOPE, hex_payload)
 
+        deadline = time.time() + 60  # 60-second timeout
         while result is None:
+            if time.time() > deadline:
+                raise TimeoutError(
+                    f"[LocationRequest] No response received for {name} within 60 s "
+                    "(FCM connection may have been reset)"
+                )
             time.sleep(0.1)
 
         return _parse_locations(result)

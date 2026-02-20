@@ -24,6 +24,7 @@ to your Traccar instance.
     ├── service.py              # Flask app + background sync service
     ├── Dockerfile              # Docker image definition
     ├── docker-compose.yml      # Docker Compose stack
+    ├── deploy.sh               # Pull + rebuild script
     ├── .env.example            # Environment variable template
     ├── requirements.txt        # Traccar-specific dependencies (flask, requests)
     ├── README.md               # This file
@@ -57,26 +58,29 @@ The Docker image is **self-contained**: the Dockerfile clones both
 this repository (Traccar sync module) at build time and merges their
 `requirements.txt` — no local source files are copied into the image.
 
-Only three files are needed locally: `Dockerfile`, `docker-compose.yml`, and `.env`.
+The Docker image is built entirely at image-build time — only four files are needed locally.
 
 ```bash
 # 1. Download only the required files (no full clone needed)
 mkdir traccar-sync && cd traccar-sync
-curl -LO https://raw.githubusercontent.com/Tloxipeuhca/google-tools-traccar-sync/main/Traccar/Dockerfile
-curl -LO https://raw.githubusercontent.com/Tloxipeuhca/google-tools-traccar-sync/main/Traccar/docker-compose.yml
-curl -LO https://raw.githubusercontent.com/Tloxipeuhca/google-tools-traccar-sync/main/Traccar/.env.example
+curl -sSfLO https://raw.githubusercontent.com/Tloxipeuhca/google-tools-traccar-sync/main/Traccar/Dockerfile
+curl -sSfLO https://raw.githubusercontent.com/Tloxipeuhca/google-tools-traccar-sync/main/Traccar/docker-compose.yml
+curl -sSfLO https://raw.githubusercontent.com/Tloxipeuhca/google-tools-traccar-sync/main/Traccar/.env.example
+curl -sSfLO https://raw.githubusercontent.com/Tloxipeuhca/google-tools-traccar-sync/main/Traccar/deploy.sh
+chmod +x deploy.sh
 
 # 2. Configure environment variables
 cp .env.example .env
 # Edit .env — set at minimum TRACCAR_SERVER_URL and API_TOKEN
 
 # 3. Generate Google credentials (interactive, runs once)
-mkdir -p Auth
+# Create an empty secrets.json first so Docker can bind-mount the file (not a directory)
+mkdir -p Auth && touch Auth/secrets.json
 docker compose run --rm traccar-sync python main.py
 # Follow the on-screen prompts → writes Auth/secrets.json on the host
 
 # 4. Start the service
-docker compose up -d
+docker compose up --build -d
 docker compose logs -f      # stream logs
 docker compose down         # stop
 ```
@@ -84,11 +88,32 @@ docker compose down         # stop
 | Variable | Default | Description |
 | --- | --- | --- |
 | `TRACCAR_SERVER_URL` | `http://traccar:8082` | Traccar OsmAnd HTTP endpoint |
-| `PORT` | `5001` | Host port exposed by the Flask service |
+| `PORT` | `5002` | Host port exposed by the Flask service |
 | `API_TOKEN` | *(empty)* | Bearer token — set to enable authentication |
 | `AUTO_REGISTER_SERVICES` | `true` | Enable automatic sync service registration for all devices |
-| `AUTO_REGISTER_TIMER` | `60` | Sync interval (seconds) applied when auto-registering |
+| `AUTO_REGISTER_TIMER` | `600` | Sync interval (seconds) applied when auto-registering |
 | `AUTO_REGISTER_DELTA` | `5` | Jitter (seconds) applied when auto-registering |
+
+#### Update / redeploy
+
+Use `deploy.sh` to pull the latest code and rebuild the image only if something changed.
+Docker's build cache ensures layers are reused when the Dockerfile is unchanged.
+
+```bash
+./deploy.sh
+```
+
+What `deploy.sh` does:
+
+1. Re-downloads `Dockerfile`, `docker-compose.yml`, and `deploy.sh` itself via curl
+2. `docker compose up --build -d` — rebuilds the image if any layer changed, otherwise reuses the cache
+3. Prints the last 30 log lines to confirm the service restarted correctly
+
+| Situation | Rebuild time |
+| --- | --- |
+| Nothing changed | ~1 s (100 % cache hit) |
+| Only `service.py` changed | ~2 s (re-copies files, no reinstall) |
+| `Dockerfile` or `requirements.txt` changed | Full rebuild from the changed layer |
 
 ### Option B: Python virtual environment
 
@@ -122,7 +147,7 @@ cp ./Traccar/.env.example ./Traccar/.env
 python -m Traccar.service
 ```
 
-The service will be available at `http://localhost:5001`.
+The service will be available at `http://localhost:5002`.
 Stop it with `Ctrl+C`; the `.venv/` directory can be reused across restarts.
 
 ### CLI arguments
@@ -130,7 +155,7 @@ Stop it with `Ctrl+C`; the `.venv/` directory can be reused across restarts.
 | Argument | Default | Description |
 | --- | --- | --- |
 | `--server-url` | `None` | Traccar server base URL, e.g. `http://localhost:8082` |
-| `--port` | `5001` | Port for the Flask service |
+| `--port` | `5002` | Port for the Flask service |
 
 If `--server-url` is omitted, all `/traccar/*` push routes will return an error.
 
@@ -173,11 +198,30 @@ Full endpoint documentation (resources, authentication, all routes, background s
 
 ## Usage examples
 
-The examples below assume the service runs on `http://localhost:5001` and that `TOKEN` holds a valid Bearer token. Omit the `-H "Authorization: ..."` header when `API_TOKEN` is not set.
+The examples below assume the service runs on `http://localhost:5002` and that `TOKEN` holds a valid Bearer token. Omit the `-H "Authorization: ..."` header when `API_TOKEN` is not set.
+
+### Quick setup — read token from `.env`
 
 ```bash
-export $BASE=$http://localhost:5001
-export TOKEN=your-secret-token
+TOKEN=$(grep '^API_TOKEN=' .env | cut -d'=' -f2)
+PORT=$(grep '^PORT=' .env | cut -d'=' -f2)
+BASE=http://localhost:${PORT:-5002}
+```
+
+Or add a persistent alias to `~/.bash_aliases` (replace the path with your deployment directory):
+
+```bash
+_ENV=/srv/docker/traccar-sync/.env
+alias traccar='curl -s -H "Authorization: Bearer $(grep "^API_TOKEN=" $_ENV | cut -d= -f2)"'
+BASE=http://localhost:$(grep '^PORT=' $_ENV | cut -d= -f2)
+```
+
+Then use it directly:
+
+```bash
+traccar $BASE/services
+traccar $BASE/devices
+traccar -X DELETE $BASE/devices/abc123/services
 ```
 
 ### List all tracked devices
