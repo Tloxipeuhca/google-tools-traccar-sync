@@ -94,11 +94,18 @@ def _setup_logging() -> logging.Logger:
     log.addHandler(file_handler)
     log.addHandler(console_handler)
 
-    # Suppress werkzeug access-log lines for /health (healthcheck noise every 30 s)
+    # Route werkzeug access logs through our formatter.
+    # Clear its default stderr handler, inject ours, and suppress /health noise.
     class _NoHealthFilter(logging.Filter):
         def filter(self, record):
             return '/health' not in record.getMessage()
-    logging.getLogger('werkzeug').addFilter(_NoHealthFilter())
+
+    wz = logging.getLogger('werkzeug')
+    wz.handlers.clear()
+    wz.addHandler(console_handler)
+    wz.addHandler(file_handler)
+    wz.addFilter(_NoHealthFilter())
+    wz.propagate = False
 
     return log
 
