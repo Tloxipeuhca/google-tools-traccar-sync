@@ -99,6 +99,13 @@ app = Flask(__name__)
 # Read once at startup; None → authentication disabled
 _API_TOKEN: str | None = os.environ.get('API_TOKEN') or None
 
+# ---------------------------------------------------------------------------
+# Auto-registration config – read once at startup from environment
+# ---------------------------------------------------------------------------
+_AUTO_REGISTER: bool = os.environ.get('AUTO_REGISTER_SERVICES', 'true').strip().lower() not in ('0', 'false', 'no')
+_AUTO_REGISTER_TIMER: int = int(os.environ.get('AUTO_REGISTER_TIMER', '60'))
+_AUTO_REGISTER_DELTA: int = int(os.environ.get('AUTO_REGISTER_DELTA', '5'))
+
 
 @app.before_request
 def _log_request():
@@ -129,9 +136,11 @@ def _log_response(response):
 _DATA_DIR       = os.path.join(_PROJECT_ROOT, 'Data')
 os.makedirs(_DATA_DIR, exist_ok=True)
 
-_SERVICES_FILE  = os.path.join(_DATA_DIR, 'services.json')
-_LOCATIONS_FILE = os.path.join(_DATA_DIR, 'locations.json')
-_DEVICES_FILE   = os.path.join(_DATA_DIR, 'devices.json')
+_SERVICES_FILE          = os.path.join(_DATA_DIR, 'services.json')
+_LOCATIONS_FILE         = os.path.join(_DATA_DIR, 'locations.json')
+_DEVICES_FILE           = os.path.join(_DATA_DIR, 'devices.json')
+_LOCATIONS_LOG_FILE     = os.path.join(_DATA_DIR, 'locations.log')
+_EXCLUDED_DEVICES_FILE  = os.path.join(_DATA_DIR, 'excluded_devices.json')
 
 # Set at startup via --server-url argument
 TRACCAR_SERVER_URL: str | None = None
@@ -202,6 +211,18 @@ def _save_devices_db(devices: list) -> None:
         json.dump(devices, f, indent=2)
 
 
+def _load_excluded_devices() -> set[str]:
+    if not os.path.exists(_EXCLUDED_DEVICES_FILE):
+        return set()
+    with open(_EXCLUDED_DEVICES_FILE, 'r') as f:
+        return set(json.load(f))
+
+
+def _save_excluded_devices(excluded: set[str]) -> None:
+    with open(_EXCLUDED_DEVICES_FILE, 'w') as f:
+        json.dump(sorted(excluded), f, indent=2)
+
+
 def _refresh_devices() -> list:
     """Fetches device list from Google Find My, persists to devices.json, returns the list."""
     result_hex  = request_device_list()
@@ -247,6 +268,7 @@ def _to_location_resource(device_id: str, loc: dict) -> dict:
         'lat':       loc['latitude'],
         'lon':       loc['longitude'],
         'timestamp': loc['time'],
+        'loc_status': loc['status'],
     }
 
 
@@ -264,6 +286,17 @@ def _get_new_locations(device_id: str, locations: list) -> list:
     return [loc for loc in locations if _compute_location_hash(loc) not in known]
 
 
+def _append_location_log(location: dict, traccar_http_status: int | None) -> None:
+    """Appends one JSON line to locations.log for every Traccar push attempt."""
+    entry = {
+        **_enrich_location(location),
+        'traccar_status': traccar_http_status,
+        'synced_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    with open(_LOCATIONS_LOG_FILE, 'a', encoding='utf-8') as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+
+
 def _persist_location(location: dict) -> str:
     """Adds a location hash to locations.json. Returns the hash."""
     device_id = location['id']
@@ -277,10 +310,10 @@ def _persist_location(location: dict) -> str:
     return h
 
 
-def _send_to_traccar(device_id: str, location: dict) -> tuple[bool, str]:
-    """POSTs a single location to the Traccar server. Returns (ok, message)."""
+def _send_to_traccar(device_id: str, location: dict) -> tuple[bool, int | None, str]:
+    """POSTs a single location to the Traccar server. Returns (ok, http_status, message)."""
     if not TRACCAR_SERVER_URL:
-        return False, "Traccar server URL not configured (use --server-url)"
+        return False, None, "Traccar server URL not configured (use --server-url)"
     url = TRACCAR_SERVER_URL #f"{TRACCAR_SERVER_URL.rstrip('/')}" #/api/positions"
     payload = {
         'id':        device_id,
@@ -292,10 +325,10 @@ def _send_to_traccar(device_id: str, location: dict) -> tuple[bool, str]:
         logger.debug(f"--> POST {url}  body={payload}")
         resp = requests.post(url, data=payload, timeout=10)
         logger.debug(f"<-- {resp.status_code} POST {url}  body={resp.text}")
-        return resp.status_code in (200, 204), resp.text
+        return resp.status_code in (200, 204), resp.status_code, resp.text
     except Exception as exc:
         logger.error(f"<-- ERROR POST {url}  {exc}")
-        return False, str(exc)
+        return False, None, str(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +388,8 @@ def route_put_traccar_locations(device_id):
     if want_single:
         location = flask_request.get_json()
         logger.info(f"[PUT /traccar/devices/{device_id}/locations?single] Pushing ts={location.get('timestamp')} lat={location.get('lat')} lon={location.get('lon')}")
-        ok, msg = _send_to_traccar(device_id, location)
+        ok, http_status, msg = _send_to_traccar(device_id, location)
+        _append_location_log(location, http_status)
         if ok:
             logger.info(f"[PUT /traccar/devices/{device_id}/locations?single] Push OK")
             return jsonify({'status': 'ok'})
@@ -372,7 +406,8 @@ def route_put_traccar_locations(device_id):
     results = []
     for loc in new_locations:
         # Step 3 – push to Traccar
-        ok, msg = _send_to_traccar(device_id, loc)
+        ok, http_status, msg = _send_to_traccar(device_id, loc)
+        _append_location_log(loc, http_status)
         if ok:
             # Step 4 – persist
             _persist_location(loc)
@@ -432,6 +467,9 @@ def route_get_device_service(device_id):
 @app.route('/devices/<device_id>/services', methods=['PUT'])
 def route_put_device_service(device_id):
     """Adds or updates a periodic sync service for a device (Service resource 4.9)."""
+    if device_id in _load_excluded_devices():
+        logger.warning(f"[PUT /devices/{device_id}/service] Device is excluded — refusing")
+        return jsonify({'error': 'Device is excluded from sync services'}), 403
     data  = flask_request.get_json()
     timer = int(data.get('timer', 60))
     delta = int(data.get('delta', 5))
@@ -467,6 +505,51 @@ def route_delete_device_service(device_id):
     _stop_device_service(device_id)
     logger.info(f"[DELETE /devices/{device_id}/service] Service deleted")
     return jsonify({'status': 'deleted'})
+
+
+# ---------------------------------------------------------------------------
+# Excluded devices – CRUD
+# ---------------------------------------------------------------------------
+
+@app.route('/excluded-devices', methods=['GET'])
+def route_get_excluded_devices():
+    """Returns the list of device IDs excluded from auto-registration."""
+    excluded = _load_excluded_devices()
+    names    = {d['id']: d.get('name', d['id']) for d in _load_devices_db()}
+    result   = [{'id': did, 'name': names.get(did, did)} for did in sorted(excluded)]
+    logger.info(f"[GET /excluded-devices] {len(result)} excluded device(s)")
+    return jsonify(result)
+
+
+@app.route('/excluded-devices/<device_id>', methods=['PUT'])
+def route_put_excluded_device(device_id):
+    """Adds a device to the exclusion list and stops its sync service if running."""
+    excluded = _load_excluded_devices()
+    already  = device_id in excluded
+    excluded.add(device_id)
+    _save_excluded_devices(excluded)
+    services = _load_services()
+    had_service = any(s['device_id'] == device_id for s in services)
+    if had_service:
+        _save_services([s for s in services if s['device_id'] != device_id])
+        _stop_device_service(device_id)
+        logger.info(f"[PUT /excluded-devices/{device_id}] Excluded — service stopped")
+    else:
+        logger.info(f"[PUT /excluded-devices/{device_id}] Excluded — no active service")
+    return jsonify({'device_id': device_id, 'excluded': True}), (200 if already else 201)
+
+
+@app.route('/excluded-devices/<device_id>', methods=['DELETE'])
+def route_delete_excluded_device(device_id):
+    """Removes a device from the exclusion list."""
+    excluded = _load_excluded_devices()
+    if device_id not in excluded:
+        logger.warning(f"[DELETE /excluded-devices/{device_id}] Not in exclusion list")
+        return jsonify({'error': 'Device not in exclusion list'}), 404
+    excluded.discard(device_id)
+    _save_excluded_devices(excluded)
+    logger.info(f"[DELETE /excluded-devices/{device_id}] Removed from exclusion list")
+    return jsonify({'device_id': device_id, 'excluded': False})
 
 
 # ---------------------------------------------------------------------------
@@ -547,7 +630,8 @@ def _sync_device(device_id: str) -> None:
     synced = 0
     failed = 0
     for loc in new_locations:
-        ok, msg = _send_to_traccar(device_id, loc)
+        ok, http_status, msg = _send_to_traccar(device_id, loc)
+        _append_location_log(loc, http_status)
         if ok:
             _persist_location(loc)
             logger.info(f"[sync:{device_id}]   ✓ ts={loc['timestamp']}")
@@ -642,6 +726,90 @@ def _start_devices_refresh() -> None:
     logger.info("[devices-refresh] Started — interval=3600s, thread=traccar-devices-refresh")
 
 
+def _auto_register_services() -> None:
+    """Registers a sync service for every cached device not already registered and not excluded."""
+    devices = _load_devices_db()
+    if not devices:
+        logger.info("[auto-register] Device cache empty, skipping cycle")
+        return
+    excluded     = _load_excluded_devices()
+    services     = _load_services()
+    registered   = {s['device_id'] for s in services}
+    new_count    = 0
+    for dev in devices:
+        did  = dev['id']
+        name = dev.get('name', did)
+        if did in excluded:
+            logger.info(f"[auto-register] {name} ({did}) — excluded")
+            continue
+        if did in registered:
+            logger.debug(f"[auto-register] {name} ({did}) — already registered")
+            continue
+        services.append({'device_id': did, 'timer': _AUTO_REGISTER_TIMER, 'delta': _AUTO_REGISTER_DELTA})
+        _save_services(services)
+        registered.add(did)
+        _start_device_service(did, _AUTO_REGISTER_TIMER, _AUTO_REGISTER_DELTA)
+        logger.info(f"[auto-register] {name} ({did}) — registered timer={_AUTO_REGISTER_TIMER}s delta=±{_AUTO_REGISTER_DELTA}s")
+        new_count += 1
+    if new_count == 0:
+        logger.info("[auto-register] No new devices to register")
+    else:
+        logger.info(f"[auto-register] {new_count} new service(s) registered")
+
+
+def _run_auto_register(stop_event: threading.Event) -> None:
+    """Worker: waits for the first device refresh, then auto-registers every 600 seconds."""
+    # Give the devices-refresh thread time to complete its first fetch before cycle 1
+    if stop_event.wait(5):
+        return
+    cycle = 0
+    while True:
+        cycle += 1
+        logger.info(f"[auto-register] Cycle #{cycle} — checking devices...")
+        try:
+            _auto_register_services()
+        except Exception as exc:
+            logger.error(f"[auto-register] Error in cycle #{cycle}: {exc}")
+        if stop_event.wait(600):
+            logger.info("[auto-register] Stop signal received, exiting thread")
+            break
+
+
+def _start_auto_register() -> None:
+    """Starts the background thread that periodically auto-registers sync services."""
+    if not _AUTO_REGISTER:
+        logger.info("[auto-register] Disabled via AUTO_REGISTER_SERVICES=false")
+        return
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_run_auto_register,
+        args=(stop_event,),
+        daemon=True,
+        name="traccar-auto-register",
+    )
+    thread.start()
+    excluded = _load_excluded_devices()
+    excluded_label = ', '.join(sorted(excluded)) if excluded else 'none'
+    logger.info(f"[auto-register] Started — interval=600s timer={_AUTO_REGISTER_TIMER}s delta=±{_AUTO_REGISTER_DELTA}s excluded=[{excluded_label}]")
+
+
+def _enforce_exclusions() -> None:
+    """Stops and removes any registered service whose device is in the exclusion list."""
+    excluded = _load_excluded_devices()
+    if not excluded:
+        return
+    services   = _load_services()
+    to_remove  = [s for s in services if s['device_id'] in excluded]
+    if not to_remove:
+        return
+    for svc in to_remove:
+        did = svc['device_id']
+        _stop_device_service(did)
+        logger.info(f"[exclusions] Stopped service for excluded device {did}")
+    _save_services([s for s in services if s['device_id'] not in excluded])
+    logger.info(f"[exclusions] Removed {len(to_remove)} excluded service(s)")
+
+
 def _start_all_services() -> None:
     """Loads services.json and starts a background thread for every registered service."""
     services = _load_services()
@@ -689,5 +857,7 @@ if __name__ == '__main__':
 
     _start_devices_refresh()
     _start_all_services()
+    _enforce_exclusions()
+    _start_auto_register()
 
     app.run(host='0.0.0.0', port=args.port, debug=False)

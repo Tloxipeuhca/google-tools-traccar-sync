@@ -25,9 +25,9 @@ services:
       API_TOKEN: "${API_TOKEN:-}"
     volumes:
       # Google Find My credentials – generated once with: docker compose run traccar-sync python main.py
-      - ../Auth:/app/Auth
+      - ./Auth:/app/Auth
       # Persistent runtime data (services.json, devices.json, locations.json)
-      - ../Data:/app/Data
+      - ./Data:/app/Data
       # Log files
-      - ../logs:/app/logs
+      - ./Logs:/app/logs
     restart: unless-stopped
