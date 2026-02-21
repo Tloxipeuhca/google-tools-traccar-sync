@@ -63,10 +63,10 @@ The Docker image is built entirely at image-build time — only four files are n
 ```bash
 # 1. Download only the required files (no full clone needed)
 mkdir traccar-sync && cd traccar-sync
-curl -sSfLO https://raw.githubusercontent.com/Tloxipeuhca/google-tools-traccar-sync/main/Traccar/Dockerfile
-curl -sSfLO https://raw.githubusercontent.com/Tloxipeuhca/google-tools-traccar-sync/main/Traccar/docker-compose.yml
-curl -sSfLO https://raw.githubusercontent.com/Tloxipeuhca/google-tools-traccar-sync/main/Traccar/.env.example
-curl -sSfLO https://raw.githubusercontent.com/Tloxipeuhca/google-tools-traccar-sync/main/Traccar/deploy.sh
+curl -sSfLO https://raw.githubusercontent.com/Tloxipeuhca/google-tools-traccar-sync/main/Dockerfile
+curl -sSfLO https://raw.githubusercontent.com/Tloxipeuhca/google-tools-traccar-sync/main/docker-compose.yml
+curl -sSfLO https://raw.githubusercontent.com/Tloxipeuhca/google-tools-traccar-sync/main/.env.example
+curl -sSfLO https://raw.githubusercontent.com/Tloxipeuhca/google-tools-traccar-sync/main/deploy.sh
 chmod +x deploy.sh
 
 # 2. Configure environment variables
