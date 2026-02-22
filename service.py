@@ -19,7 +19,7 @@ import hashlib
 import logging
 import threading
 import argparse
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import requests
 from flask import Flask, jsonify, request as flask_request
@@ -280,7 +280,6 @@ def route_post_token_status():
                       .get('installation', {})
                       .get('expires_in'))
         if mtime and expires_in:
-            from datetime import timedelta
             fcm_exp       = mtime + timedelta(seconds=int(expires_in))
             fcm_days_left = (fcm_exp - datetime.now()).days
 
@@ -1181,6 +1180,86 @@ def _start_auto_register() -> None:
     logger.info(f"[auto-register] Started — interval=600s timer={_AUTO_REGISTER_TIMER}s delta=±{_AUTO_REGISTER_DELTA}s excluded=[{excluded_label}]")
 
 
+def _check_fcm_expiry() -> None:
+    """Sends a warning email if the FCM installation token expires within 24 hours."""
+    if not os.path.exists(_AUTH_SECRETS_FILE) or os.path.getsize(_AUTH_SECRETS_FILE) <= 2:
+        return
+    try:
+        with open(_AUTH_SECRETS_FILE, 'r', encoding='utf-8') as f:
+            secrets = json.load(f)
+    except Exception:
+        return
+
+    expires_in = (secrets
+                  .get('fcm_credentials', {})
+                  .get('fcm', {})
+                  .get('installation', {})
+                  .get('expires_in'))
+    if not expires_in:
+        return
+
+    mtime   = datetime.fromtimestamp(os.path.getmtime(_AUTH_SECRETS_FILE))
+    fcm_exp = mtime + timedelta(seconds=int(expires_in))
+    delta   = fcm_exp - datetime.now()
+    hours_left = delta.total_seconds() / 3600
+
+    # Only notify once: when between 0 and 24 hours remain
+    if not (0 <= hours_left <= 24):
+        return
+
+    # Guard: don't re-send if already notified for this expiry date (same day)
+    notif_key = fcm_exp.strftime('%Y-%m-%d')
+    if notif_key in _fcm_expiry_notified:
+        return
+    _fcm_expiry_notified.add(notif_key)
+
+    exp_str    = fcm_exp.strftime('%Y-%m-%d %H:%M:%S')
+    hours_int  = int(hours_left)
+    minutes_int = int((hours_left - hours_int) * 60)
+    logger.warning(f"[token-watch] FCM token expires in {hours_int}h{minutes_int}min ({exp_str})")
+    send_notification(
+        subject="FineTrack — Token FCM expire dans moins de 24h",
+        body=(
+            f"Le token d'installation Firebase (FCM) expire dans {hours_int}h {minutes_int}min.\n\n"
+            f"Expiration   : {exp_str}\n"
+            f"Mise à jour  : {mtime.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            "Action requise : regénérer Auth/secrets.json sur un poste local avec Chrome\n"
+            "puis uploader via :\n"
+            "  PUT /auth/secrets    → remplacer le fichier complet\n"
+            "  PUT /auth/aas-token  → renouveler uniquement le token AAS\n"
+        ),
+        alert_level='warning',
+    )
+
+
+_fcm_expiry_notified: set[str] = set()
+
+
+def _run_token_expiry_watch(stop_event: threading.Event) -> None:
+    """Worker: checks FCM token expiry every hour and sends a J-1 warning email."""
+    while True:
+        try:
+            _check_fcm_expiry()
+        except Exception as exc:
+            logger.error(f"[token-watch] Error: {exc}")
+        if stop_event.wait(3600):
+            logger.info("[token-watch] Stop signal received, exiting thread")
+            break
+
+
+def _start_token_expiry_watch() -> None:
+    """Starts the hourly background thread that watches FCM token expiry."""
+    stop_event = threading.Event()
+    thread = threading.Thread(
+        target=_run_token_expiry_watch,
+        args=(stop_event,),
+        daemon=True,
+        name="traccar-token-watch",
+    )
+    thread.start()
+    logger.info("[token-watch] Started — interval=3600s, sends warning when FCM token expires within 24h")
+
+
 def _enforce_exclusions() -> None:
     """Stops and removes any registered service whose device is in the exclusion list."""
     excluded = _load_excluded_devices()
@@ -1248,5 +1327,6 @@ if __name__ == '__main__':
     _start_all_services()
     _enforce_exclusions()
     _start_auto_register()
+    _start_token_expiry_watch()
 
     app.run(host='0.0.0.0', port=args.port, debug=False)
