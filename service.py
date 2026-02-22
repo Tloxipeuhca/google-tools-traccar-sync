@@ -251,6 +251,77 @@ def route_put_secrets():
     return jsonify({'status': 'ok', 'services_restarted': len(services)})
 
 
+@app.route('/auth/token-status', methods=['POST'])
+def route_post_token_status():
+    """
+    Sends an email reporting the current state and age of the cached AAS token.
+    The age is derived from the modification time of Auth/secrets.json.
+    """
+    # --- gather info ---
+    expired = _auth_needs_reauth
+
+    if not os.path.exists(_AUTH_SECRETS_FILE):
+        token_present = False
+        mtime_str     = None
+        age_str       = None
+    else:
+        with open(_AUTH_SECRETS_FILE, 'r', encoding='utf-8') as f:
+            secrets = json.load(f) if os.path.getsize(_AUTH_SECRETS_FILE) > 2 else {}
+        token_present = bool(secrets.get('aas_token'))
+        mtime         = datetime.fromtimestamp(os.path.getmtime(_AUTH_SECRETS_FILE))
+        mtime_str     = mtime.strftime('%Y-%m-%d %H:%M:%S')
+        delta         = datetime.now() - mtime
+        days          = delta.days
+        hours         = delta.seconds // 3600
+        minutes       = (delta.seconds % 3600) // 60
+        age_str       = f"{days}j {hours}h {minutes}min" if days else f"{hours}h {minutes}min"
+
+    # --- build email ---
+    if expired:
+        level   = 'error'
+        status_line = "EXPIRÉ — ré-authentification requise"
+    elif not token_present:
+        level   = 'warning'
+        status_line = "ABSENT — aucun token dans secrets.json"
+    else:
+        level   = 'success'
+        status_line = "VALIDE"
+
+    body_lines = [
+        f"État du token AAS : {status_line}",
+        "",
+    ]
+    if mtime_str:
+        body_lines += [
+            f"Dernière mise à jour  : {mtime_str}",
+            f"Âge du token          : {age_str}",
+        ]
+    else:
+        body_lines.append("Fichier Auth/secrets.json introuvable.")
+    body_lines += [
+        "",
+        "Actions disponibles :",
+        "  • Renouveler le token  → PUT /auth/aas-token",
+        "  • Remplacer le fichier → PUT /auth/secrets",
+        f"\nHorodatage : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+    ]
+
+    send_notification(
+        subject=f"FineTrack — Statut du token Google ({status_line})",
+        body='\n'.join(body_lines),
+        alert_level=level,
+    )
+    logger.info(f"[auth] token-status email sent — {status_line}")
+
+    result = {
+        'status':        'expired' if expired else ('absent' if not token_present else 'ok'),
+        'token_present': token_present,
+        'last_updated':  mtime_str,
+        'age':           age_str,
+    }
+    return jsonify(result)
+
+
 @app.route('/notify/test', methods=['POST'])
 def route_notify_test():
     """Sends a test email to verify SMTP configuration. Requires auth if API_TOKEN is set."""

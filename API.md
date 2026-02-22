@@ -225,6 +225,35 @@ curl -X PUT http://localhost:5002/auth/secrets \
 
 ---
 
+#### `POST /auth/token-status`
+
+Envoie un email indiquant l'état et l'âge du token AAS actuellement en cache.
+L'âge est calculé à partir de la date de modification de `Auth/secrets.json`
+(= dernière fois que le token a été généré ou mis à jour).
+
+**Response** – objet JSON
+
+```json
+{
+  "status":        "ok",
+  "token_present": true,
+  "last_updated":  "2026-02-01 14:32:00",
+  "age":           "21j 3h 12min"
+}
+```
+
+| `status` | Signification |
+| --- | --- |
+| `ok` | Token présent et non marqué expiré |
+| `expired` | `GET /health` retourne `503 auth_required` |
+| `absent` | Fichier absent ou `aas_token` manquant dans `secrets.json` |
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:5002/auth/token-status
+```
+
+---
+
 ### Devices
 
 #### `GET /devices`
@@ -536,6 +565,7 @@ NopaApiExtend.get_location_data_for_device_extended()
         │
         ├── PUT    /auth/secrets                  → upload full secrets.json (first-time setup)
         ├── PUT    /auth/aas-token                → renew expired aas_token only
+        ├── POST   /auth/token-status             → email token age + validity status
         ├── POST   /notify/test                   → send SMTP test email
         │
         ├── GET  /devices                         → list trackers
