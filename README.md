@@ -22,6 +22,7 @@ to your Traccar instance.
 └── Traccar/
     ├── __init__.py
     ├── service.py              # Flask app + background sync service
+    ├── notifier.py             # Email notifier (SMTP via stdlib)
     ├── Dockerfile              # Docker image definition
     ├── docker-compose.yml      # Docker Compose stack
     ├── deploy.sh               # Pull + rebuild script
@@ -45,6 +46,8 @@ to your Traccar instance.
 - **Persistent state** – sync services and synced-location hashes survive restarts; all data files are created automatically on first use.
 - **Push audit log** – every Traccar push attempt (success or failure) is appended as a JSON line to `Data/locations.log`, including the HTTP response status and the `loc_status` indicator from the Google decryption layer.
 - **Auto-registration** – at startup and every 10 minutes, the service automatically registers a sync service for every discovered device not present in `Data/excluded_devices.json`; managed via the `/excluded-devices` CRUD API; can be disabled globally via `AUTO_REGISTER_SERVICES=false`.
+- **Email notifications** – optional SMTP notifications (via Python `smtplib`) for three events: Google OAuth token expiry, new device detected in `devices.json`, new device auto-registered for sync. Configured via `NOTIFY_SMTP_*` environment variables; entirely disabled when `NOTIFY_SMTP_HOST` is unset.
+- **Authentication failure handling** – when the Google OAuth token expires (`KeyError: 'Auth'`), all background sync threads stop gracefully, the expired `aas_token` is removed from `Auth/secrets.json`, an email is sent, and `/health` returns `503 auth_required` until the service is restarted.
 - **Flexible deployment** – ships as a self-contained Docker Compose stack or runs directly in a plain Python virtual environment.
 
 ---
@@ -93,6 +96,13 @@ docker compose down         # stop
 | `AUTO_REGISTER_SERVICES` | `true` | Enable automatic sync service registration for all devices |
 | `AUTO_REGISTER_TIMER` | `600` | Sync interval (seconds) applied when auto-registering |
 | `AUTO_REGISTER_DELTA` | `5` | Jitter (seconds) applied when auto-registering |
+| `NOTIFY_SMTP_HOST` | *(empty)* | SMTP server hostname — **leave empty to disable all notifications** |
+| `NOTIFY_SMTP_PORT` | `587` | SMTP port (`587` for STARTTLS, `465` for SSL) |
+| `NOTIFY_SMTP_USER` | *(empty)* | SMTP login username |
+| `NOTIFY_SMTP_PASS` | *(empty)* | SMTP login password (use an App Password for Gmail) |
+| `NOTIFY_EMAIL_FROM` | `NOTIFY_SMTP_USER` | Sender address (defaults to `NOTIFY_SMTP_USER`) |
+| `NOTIFY_EMAIL_TO` | *(empty)* | Recipient address(es), comma-separated |
+| `NOTIFY_SMTP_SSL` | `false` | Set to `true` to use SSL-on-connect instead of STARTTLS |
 
 #### Update / redeploy
 
@@ -173,6 +183,81 @@ If `--server-url` is omitted, all `/traccar/*` push routes will return an error.
 - Google Find My credentials configured in `Auth/secrets.json`
   (see step 2 above)
 - A running Traccar server (required only for push routes)
+
+---
+
+## Notifications email
+
+Le service peut envoyer des notifications SMTP pour trois événements :
+
+| Événement | Déclencheur |
+|---|---|
+| **Nouveau périphérique dans le compte Google** | `_refresh_devices()` — toutes les heures, si un ID absent de `devices.json` apparaît |
+| **Nouveau périphérique auto-enregistré** | `_auto_register_services()` — quand un service est créé pour un device non encore suivi |
+| **Token OAuth expiré** | `_handle_auth_failure()` — une seule fois, avant l'arrêt de tous les threads |
+
+> La notification de premier démarrage est supprimée : si `devices.json` était vide au moment du refresh, aucun email n'est envoyé (faux positif).
+
+### Configuration Gmail
+
+```ini
+NOTIFY_SMTP_HOST=smtp.gmail.com
+NOTIFY_SMTP_PORT=587
+NOTIFY_SMTP_USER=moi@gmail.com
+NOTIFY_SMTP_PASS=xxxx-xxxx-xxxx-xxxx   # App Password Google (pas le mot de passe principal)
+NOTIFY_EMAIL_TO=moi@gmail.com
+```
+
+Générer un App Password : **Compte Google → Sécurité → Validation en deux étapes → Mots de passe des applications**.
+
+### Tester la configuration
+
+```bash
+curl -X POST http://localhost:5001/notify/test
+# → {"status": "sent"}
+```
+
+Log attendu en cas de succès :
+
+```text
+[INFO ] [notify] Email sent → moi@gmail.com | FineTrack — Test de notification
+```
+
+---
+
+## Gestion de l'expiration du token Google OAuth
+
+Le token `aas_token` mis en cache dans `Auth/secrets.json` a une durée de vie limitée.
+Quand Google le rejette, le service détecte l'erreur `KeyError: 'Auth'` et :
+
+1. Arrête proprement tous les threads de sync
+2. Supprime le `aas_token` expiré de `Auth/secrets.json`
+3. Envoie un email de notification (si SMTP configuré)
+4. Fait retourner `503 auth_required` à `GET /health`
+
+```bash
+curl http://localhost:5001/health
+# → {"status": "auth_required", "services": 0}   ← action requise
+# → {"status": "ok", "services": 4}               ← service sain
+```
+
+**Pour récupérer — deux options :**
+
+**Option A — sans redémarrer** (recommandé si le service doit rester disponible) :
+
+```bash
+# 1. Générer un nouveau token interactivement (depuis le poste local)
+python -c "from Auth.aas_token_retrieval import _generate_aas_token; print(_generate_aas_token())"
+
+# 2. L'injecter via l'API
+curl -X PUT http://localhost:5001/auth/aas-token \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"aas_token": "aas_et/AKppIN..."}'
+# → {"status": "ok", "services_restarted": 4}
+```
+
+**Option B — redémarrer le service** : le flux Chrome se relance automatiquement pour se re-authentifier.
 
 ---
 

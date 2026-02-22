@@ -112,6 +112,81 @@ Newline-delimited JSON file. One entry is appended for **every Traccar push atte
 
 ## Endpoints
 
+### Utilitaires
+
+#### `GET /health`
+
+Sonde de liveness — toujours publique, aucun appel externe.
+
+**Response** – objet JSON avec les champs `status` et `services`
+
+| `status` | Code HTTP | Signification |
+| --- | --- | --- |
+| `ok` | `200` | Service opérationnel |
+| `auth_required` | `503` | Token Google OAuth expiré — redémarrage requis |
+
+```bash
+curl http://localhost:5002/health
+# → {"status": "ok", "services": 4}
+```
+
+---
+
+#### `GET /versions`
+
+Retourne la version du service (commit git) et la date de build.
+Toujours publique, aucune authentification requise.
+
+**Response** – `{"version": "abc1234", "built_at": "2026-02-20T08:00:00"}`
+
+```bash
+curl http://localhost:5002/versions
+```
+
+---
+
+#### `POST /notify/test`
+
+Envoie un email de test pour vérifier la configuration SMTP.
+Requiert l'authentification Bearer si `API_TOKEN` est défini.
+
+**Response** – `{"status": "sent"}` — `500` si l'envoi échoue (détail dans `message`)
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:5002/notify/test
+```
+
+---
+
+#### `PUT /auth/aas-token`
+
+Injecte un nouvel `aas_token` dans `Auth/secrets.json` sans redémarrer le service.
+Utile pour renouveler le token Google OAuth expiré depuis l'API plutôt qu'en éditant le fichier manuellement.
+Remet à zéro l'état `auth_required` et redémarre tous les services de sync enregistrés.
+
+**Body** – `application/json`
+
+```json
+{ "aas_token": "aas_et/AKppIN..." }
+```
+
+**Response** – objet JSON
+
+| Cas | Code HTTP | Corps |
+| --- | --- | --- |
+| Succès | `200` | `{"status": "ok", "services_restarted": 4}` |
+| Champ manquant | `400` | `{"error": "aas_token is required"}` |
+| Erreur d'écriture | `500` | `{"error": "..."}` |
+
+```bash
+curl -X PUT http://localhost:5002/auth/aas-token \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"aas_token": "aas_et/AKppIN..."}'
+```
+
+---
+
 ### Devices
 
 #### `GET /devices`

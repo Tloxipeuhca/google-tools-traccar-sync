@@ -35,6 +35,7 @@ if _PROJECT_ROOT not in sys.path:
 from NovaApi.ListDevices.nbe_list_devices import request_device_list
 from ProtoDecoders.decoder import parse_device_list_protobuf, get_canonic_ids
 from Traccar.NopaApiExtend.location_request_extend import get_location_data_for_device_extended
+from Traccar.notifier import send_notification
 
 # ---------------------------------------------------------------------------
 # Load .env from the Traccar/ directory before any os.environ.get() call.
@@ -160,10 +161,75 @@ def _check_auth():
 @app.route('/health', methods=['GET'])
 def route_health():
     """Lightweight liveness probe — always public, no external calls."""
+    if _auth_needs_reauth:
+        return jsonify({'status': 'auth_required', 'services': len(_service_threads)}), 503
     return jsonify({'status': 'ok', 'services': len(_service_threads)})
 
 
 _BUILD_INFO_FILE = os.path.join(os.path.dirname(__file__), '_build_info.json')
+
+
+@app.route('/auth/aas-token', methods=['PUT'])
+def route_put_aas_token():
+    """
+    Injects a new aas_token into Auth/secrets.json without restarting the service.
+    Resets the auth_required flag and restarts all registered sync services.
+    """
+    global _auth_needs_reauth
+    data = flask_request.get_json(silent=True) or {}
+    new_token = data.get('aas_token', '').strip()
+    if not new_token:
+        return jsonify({'error': 'aas_token is required'}), 400
+
+    # Persist the new token
+    try:
+        if os.path.exists(_AUTH_SECRETS_FILE):
+            with open(_AUTH_SECRETS_FILE, 'r', encoding='utf-8') as f:
+                secrets = json.load(f)
+        else:
+            secrets = {}
+        secrets['aas_token'] = new_token
+        with open(_AUTH_SECRETS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(secrets, f, indent=2)
+        logger.info("[auth] aas_token updated via PUT /auth/aas-token")
+    except Exception as exc:
+        logger.error(f"[auth] Failed to write aas_token: {exc}")
+        return jsonify({'error': str(exc)}), 500
+
+    # Reset auth failure flag
+    with _auth_lock:
+        _auth_needs_reauth = False
+
+    # Restart all registered services
+    services = _load_services()
+    for svc in services:
+        did   = svc['id']
+        name  = svc.get('name') or did
+        timer = svc.get('timer', _AUTO_REGISTER_TIMER)
+        delta = svc.get('delta', _AUTO_REGISTER_DELTA)
+        _start_device_service(did, name, timer, delta)
+    logger.info(f"[auth] {len(services)} sync service(s) restarted after token update")
+    return jsonify({'status': 'ok', 'services_restarted': len(services)})
+
+
+@app.route('/notify/test', methods=['POST'])
+def route_notify_test():
+    """Sends a test email to verify SMTP configuration. Requires auth if API_TOKEN is set."""
+    try:
+        send_notification(
+            subject="FineTrack — Test de notification",
+            body=(
+                "Ceci est un email de test envoyé depuis le service FineTrack.\n\n"
+                f"Heure : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                "Si vous recevez cet email, la configuration SMTP est correcte.\n"
+            ),
+        )
+        logger.info("[notify] Test email triggered via POST /notify/test")
+        return jsonify({'status': 'sent'})
+    except Exception as exc:
+        logger.error(f"[notify] Test email failed: {exc}")
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
 
 @app.route('/versions', methods=['GET'])
 def route_versions():
@@ -191,6 +257,8 @@ _DEVICES_FILE           = os.path.join(_DATA_DIR, 'devices.json')
 _LOCATIONS_LOG_FILE     = os.path.join(_DATA_DIR, 'locations.log')
 _EXCLUDED_DEVICES_FILE  = os.path.join(_DATA_DIR, 'excluded_devices.json')
 
+_AUTH_SECRETS_FILE = os.path.join(_PROJECT_ROOT, 'Auth', 'secrets.json')
+
 # Set at startup via --server-url argument
 TRACCAR_SERVER_URL: str | None = None
 
@@ -201,6 +269,10 @@ _service_stop_events: dict[str, threading.Event]  = {}
 _service_last_sync:   dict[str, float | None]     = {}
 # Timestamp (float) of next scheduled sync per device; None = first cycle not done yet
 _service_next_sync:   dict[str, float | None]     = {}
+
+# Auth failure state — set to True when a KeyError('Auth') is detected
+_auth_needs_reauth: bool         = False
+_auth_lock:         threading.Lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +358,24 @@ def _refresh_devices() -> list:
     device_list = parse_device_list_protobuf(result_hex)
     canonic_ids = get_canonic_ids(device_list)
     devices = [{'id': cid, 'name': name} for name, cid in canonic_ids]
+
+    # Detect devices absent from the previous devices.json.
+    # Skip notification on first run (empty DB) to avoid a false-positive burst.
+    known_ids   = {d['id'] for d in _load_devices_db()}
+    new_devices = [d for d in devices if d['id'] not in known_ids]
+    if known_ids and new_devices:
+        logger.info(f"[devices] {len(new_devices)} new device(s): {[d['name'] for d in new_devices]}")
+        device_lines = "\n".join(f"  • {d['name']} ({d['id']})" for d in new_devices)
+        send_notification(
+            subject=f"FineTrack — {len(new_devices)} nouveau(x) périphérique(s) détecté(s)",
+            body=(
+                f"{len(new_devices)} nouveau(x) périphérique(s) sont apparus dans votre compte Google :\n\n"
+                f"{device_lines}\n\n"
+                f"Heure : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            ),
+            alert_level='info',
+        )
+
     _save_devices_db(devices)
     logger.info(f"[devices] Refreshed — {len(devices)} device(s): {[d['name'] for d in devices]}")
     return devices
@@ -707,6 +797,67 @@ def _sync_device(device_id: str, name: str) -> None:
         logger.info(f"{tag} Cycle done — nothing new to sync")
 
 
+def _clear_cached_aas_token() -> None:
+    """Removes the expired aas_token from Auth/secrets.json so the next startup triggers re-auth."""
+    try:
+        if not os.path.exists(_AUTH_SECRETS_FILE):
+            logger.warning("[auth] Auth/secrets.json not found — nothing to clear")
+            return
+        with open(_AUTH_SECRETS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if 'aas_token' not in data:
+            logger.warning("[auth] aas_token already absent from Auth/secrets.json")
+            return
+        del data['aas_token']
+        with open(_AUTH_SECRETS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+        logger.warning("[auth] Expired aas_token removed from Auth/secrets.json")
+    except Exception as exc:
+        logger.error(f"[auth] Failed to clear aas_token: {exc}")
+
+
+def _stop_all_device_services() -> None:
+    """Signals every background sync thread to stop and clears the registry."""
+    device_ids = list(_service_stop_events.keys())
+    for did in device_ids:
+        _service_stop_events[did].set()
+    for did in device_ids:
+        _service_threads.pop(did, None)
+        _service_stop_events.pop(did, None)
+        _service_last_sync.pop(did, None)
+        _service_next_sync.pop(did, None)
+    logger.warning(f"[auth] {len(device_ids)} sync service(s) stopped")
+
+
+def _handle_auth_failure(tag: str) -> None:
+    """Called when KeyError('Auth') is detected. Clears the token and stops all services (once)."""
+    global _auth_needs_reauth
+    with _auth_lock:
+        if _auth_needs_reauth:
+            return  # another thread already handled it
+        _auth_needs_reauth = True
+    logger.error(f"{tag} Google OAuth token expired (KeyError: 'Auth')")
+    logger.error("[auth] The cached AAS token is no longer accepted by Google")
+    logger.error("[auth] Action required: restart the service to trigger re-authentication via Chrome")
+    _clear_cached_aas_token()
+    _stop_all_device_services()
+    send_notification(
+        subject="FineTrack — Ré-authentification Google requise",
+        body=(
+            "Le token OAuth Google (AAS token) a expiré.\n\n"
+            "Action requise :\n"
+            "  1. Obtenez un nouveau token via Auth/aas_token_retrieval.py\n"
+            "     puis injectez-le sans redémarrer :\n"
+            "     PUT /auth/aas-token  { \"aas_token\": \"aas_et/...\" }\n\n"
+            "  Ou :\n"
+            "  2. Redémarrez le service — le flux Chrome se relancera automatiquement.\n\n"
+            f"Détail technique : {tag}\n"
+            f"Heure           : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        ),
+        alert_level='error',
+    )
+
+
 def _run_device_service(device_id: str, name: str, timer: int, delta: int, stop_event: threading.Event) -> None:
     """Worker thread: runs immediately then waits `timer ± random(delta)` seconds between cycles."""
     tag   = f"[service] {name} ({device_id})"
@@ -719,6 +870,11 @@ def _run_device_service(device_id: str, name: str, timer: int, delta: int, stop_
         logger.info(f"{tag} --- Cycle #{cycle} ---")
         try:
             _sync_device(device_id, name)
+        except KeyError as exc:
+            if exc.args and exc.args[0] == 'Auth':
+                _handle_auth_failure(tag)
+                break
+            logger.error(f"{tag} Unhandled error in cycle #{cycle}: {exc}")
         except Exception as exc:
             logger.error(f"{tag} Unhandled error in cycle #{cycle}: {exc}")
         jitter = random.uniform(-delta, delta)
@@ -768,6 +924,11 @@ def _run_devices_refresh(stop_event: threading.Event) -> None:
         logger.info(f"[devices-refresh] Cycle #{cycle} — refreshing devices.json...")
         try:
             _refresh_devices()
+        except KeyError as exc:
+            if exc.args and exc.args[0] == 'Auth':
+                _handle_auth_failure("[devices-refresh]")
+                break
+            logger.error(f"[devices-refresh] Error in cycle #{cycle}: {exc}")
         except Exception as exc:
             logger.error(f"[devices-refresh] Error in cycle #{cycle}: {exc}")
         if stop_event.wait(3600):
@@ -798,6 +959,7 @@ def _auto_register_services() -> None:
     services     = _load_services()
     registered   = {s['id'] for s in services}
     new_count    = 0
+    new_devices: list[tuple[str, str]] = []
     for dev in devices:
         did  = dev['id']
         name = dev.get('name', did)
@@ -812,11 +974,23 @@ def _auto_register_services() -> None:
         registered.add(did)
         _start_device_service(did, name, _AUTO_REGISTER_TIMER, _AUTO_REGISTER_DELTA)
         logger.info(f"[auto-register] {name} ({did}) — registered timer={_AUTO_REGISTER_TIMER}s delta=±{_AUTO_REGISTER_DELTA}s")
+        new_devices.append((did, name))
         new_count += 1
     if new_count == 0:
         logger.info("[auto-register] No new devices to register")
     else:
         logger.info(f"[auto-register] {new_count} new service(s) registered")
+        device_lines = "\n".join(f"  • {name} ({did})" for did, name in new_devices)
+        send_notification(
+            subject=f"FineTrack — {new_count} nouveau(x) dispositif(s) enregistré(s)",
+            body=(
+                f"{new_count} nouveau(x) dispositif(s) ont été auto-enregistrés pour la synchronisation :\n\n"
+                f"{device_lines}\n\n"
+                f"Intervalle de sync : {_AUTO_REGISTER_TIMER}s ± {_AUTO_REGISTER_DELTA}s\n"
+                f"Heure             : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            ),
+            alert_level='success',
+        )
 
 
 def _run_auto_register(stop_event: threading.Event) -> None:
