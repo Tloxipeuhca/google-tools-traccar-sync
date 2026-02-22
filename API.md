@@ -187,6 +187,44 @@ curl -X PUT http://localhost:5002/auth/aas-token \
 
 ---
 
+#### `PUT /auth/secrets`
+
+Remplace le contenu complet de `Auth/secrets.json`.
+Utilisé pour injecter les credentials dans un conteneur démarré sans fichier de secrets valide (premier déploiement ou réinitialisation complète).
+Remet à zéro l'état `auth_required` et redémarre tous les services de sync enregistrés.
+
+Le corps est le contenu JSON de `Auth/secrets.json` généré par `python main.py` sur un poste local avec Chrome.
+
+**Body** – `application/json` (contenu de `Auth/secrets.json`)
+
+```json
+{
+  "aas_token": "aas_et/AKppIN...",
+  "username": "user@gmail.com",
+  "androidId": "...",
+  "...": "..."
+}
+```
+
+**Response** – objet JSON
+
+| Cas | Code HTTP | Corps |
+| --- | --- | --- |
+| Succès | `200` | `{"status": "ok", "services_restarted": 0}` |
+| Corps invalide | `400` | `{"error": "a JSON object is required"}` |
+| `aas_token` manquant | `400` | `{"error": "aas_token is required in the secrets body"}` |
+| Erreur d'écriture | `500` | `{"error": "..."}` |
+
+```bash
+# Upload du fichier secrets.json généré localement
+curl -X PUT http://localhost:5002/auth/secrets \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d @Auth/secrets.json
+```
+
+---
+
 ### Devices
 
 #### `GET /devices`

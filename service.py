@@ -212,6 +212,45 @@ def route_put_aas_token():
     return jsonify({'status': 'ok', 'services_restarted': len(services)})
 
 
+@app.route('/auth/secrets', methods=['PUT'])
+def route_put_secrets():
+    """
+    Replaces the full contents of Auth/secrets.json.
+    Use this to inject credentials into a fresh container that has no valid secrets file.
+    Resets the auth_required flag and restarts all registered sync services.
+    """
+    global _auth_needs_reauth
+    data = flask_request.get_json(silent=True)
+    if not data or not isinstance(data, dict):
+        return jsonify({'error': 'a JSON object is required'}), 400
+    if not data.get('aas_token'):
+        return jsonify({'error': 'aas_token is required in the secrets body'}), 400
+
+    try:
+        os.makedirs(os.path.dirname(_AUTH_SECRETS_FILE), exist_ok=True)
+        with open(_AUTH_SECRETS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+        logger.info("[auth] secrets.json replaced via PUT /auth/secrets")
+    except Exception as exc:
+        logger.error(f"[auth] Failed to write secrets.json: {exc}")
+        return jsonify({'error': str(exc)}), 500
+
+    # Reset auth failure flag
+    with _auth_lock:
+        _auth_needs_reauth = False
+
+    # Restart all registered services
+    services = _load_services()
+    for svc in services:
+        did   = svc['id']
+        name  = svc.get('name') or did
+        timer = svc.get('timer', _AUTO_REGISTER_TIMER)
+        delta = svc.get('delta', _AUTO_REGISTER_DELTA)
+        _start_device_service(did, name, timer, delta)
+    logger.info(f"[auth] {len(services)} sync service(s) restarted after secrets upload")
+    return jsonify({'status': 'ok', 'services_restarted': len(services)})
+
+
 @app.route('/notify/test', methods=['POST'])
 def route_notify_test():
     """Sends a test email to verify SMTP configuration. Requires auth if API_TOKEN is set."""

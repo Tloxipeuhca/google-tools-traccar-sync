@@ -76,13 +76,46 @@ chmod +x deploy.sh
 cp .env.example .env
 # Edit .env — set at minimum TRACCAR_SERVER_URL and API_TOKEN
 
-# 3. Generate Google credentials (interactive, runs once)
-# Create an empty secrets.json first so Docker can bind-mount the file (not a directory)
-mkdir -p Auth && touch Auth/secrets.json
-docker compose run --rm traccar-sync python main.py
-# Follow the on-screen prompts → writes Auth/secrets.json on the host
+# 3. Generate Google credentials
+# The credential generation requires Chrome and an interactive terminal — it cannot run inside Docker.
+# Choose one of the two options below.
+```
 
-# 4. Start the service
+#### Option A — generate credentials on a local machine first (recommended)
+
+```bash
+# On any machine where Chrome is installed and Python is available:
+git clone https://github.com/leonboe1/GoogleFindMyTools.git
+cd GoogleFindMyTools && pip install -r requirements.txt
+python main.py
+# Follow the on-screen prompts → writes Auth/secrets.json
+
+# Copy the generated file to the server deployment directory:
+scp Auth/secrets.json user@server:/path/to/traccar-sync/data/secrets.json
+```
+
+#### Option B — start without credentials, upload via API
+
+```bash
+# Create an empty JSON file so Docker can bind-mount it (not a directory)
+mkdir -p data && echo '{}' > data/secrets.json
+
+# Start the service — it will run but sync will fail until credentials are uploaded
+docker compose up --build -d
+
+# On a local machine with Chrome, generate secrets.json (same as Option A above)
+# then upload the full file to the running service:
+TOKEN=$(grep '^API_TOKEN=' .env | cut -d'=' -f2)
+curl -X PUT http://server:5001/auth/secrets \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d @Auth/secrets.json
+# → {"status": "ok", "services_restarted": 0}
+# Sync services start automatically once credentials are accepted.
+```
+
+```bash
+# Start / stop
 docker compose up --build -d
 docker compose logs -f      # stream logs
 docker compose down         # stop
@@ -241,12 +274,27 @@ curl http://localhost:5001/health
 # → {"status": "ok", "services": 4}               ← service sain
 ```
 
-**Pour récupérer — deux options :**
+**Pour récupérer :**
 
-**Option A — sans redémarrer** (recommandé si le service doit rester disponible) :
+Générer un nouveau `secrets.json` sur un poste local avec Chrome, puis l'uploader via l'API sans redémarrer le conteneur :
 
 ```bash
-# 1. Générer un nouveau token interactivement (depuis le poste local)
+# 1. Sur le poste local — regénérer le fichier complet
+cd GoogleFindMyTools && python main.py
+# → réécrit Auth/secrets.json avec un aas_token frais
+
+# 2. Uploader le fichier vers le service en cours d'exécution
+curl -X PUT http://localhost:5001/auth/secrets \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d @Auth/secrets.json
+# → {"status": "ok", "services_restarted": 4}
+```
+
+Si seul le `aas_token` a expiré (le reste de `secrets.json` est valide), on peut injecter uniquement le token :
+
+```bash
+# 1. Extraire le token depuis le poste local
 python -c "from Auth.aas_token_retrieval import _generate_aas_token; print(_generate_aas_token())"
 
 # 2. L'injecter via l'API
@@ -257,7 +305,7 @@ curl -X PUT http://localhost:5001/auth/aas-token \
 # → {"status": "ok", "services_restarted": 4}
 ```
 
-**Option B — redémarrer le service** : le flux Chrome se relance automatiquement pour se re-authentifier.
+> **Remarque** : le flux Chrome ne fonctionne pas à l'intérieur du conteneur Docker (pas d'affichage graphique). Toute génération de credentials doit se faire sur un poste local.
 
 ---
 
