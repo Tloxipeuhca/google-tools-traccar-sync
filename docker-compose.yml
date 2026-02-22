@@ -30,9 +30,9 @@ services:
     volumes:
       # Google Find My credentials – generated once with: docker compose run traccar-sync python main.py
       # Mount only the credentials file (not the whole Auth/ dir) to keep Auth Python code intact
-      - ./Auth/secrets.json:/app/Auth/secrets.json
+      - ./data/secrets.json:/app/Auth/secrets.json
       # Persistent runtime data (services.json, devices.json, locations.json)
-      - ./Data:/app/Data
+      - ./data:/app/Data
       # Log files
-      - ./Logs:/app/logs
+      - ./logs:/app/logs
     restart: unless-stopped
