@@ -254,72 +254,114 @@ def route_put_secrets():
 @app.route('/auth/token-status', methods=['POST'])
 def route_post_token_status():
     """
-    Sends an email reporting the current state and age of the cached AAS token.
-    The age is derived from the modification time of Auth/secrets.json.
+    Sends an email reporting the current state, age, and expiry of the cached credentials.
+    - AAS token age  : derived from secrets.json modification time
+    - FCM token expiry: mtime + fcm_credentials.fcm.installation.expires_in
     """
-    # --- gather info ---
     expired = _auth_needs_reauth
+    secrets       = {}
+    mtime         = None
+    token_present = False
+    fcm_exp       = None
+    fcm_days_left = None
 
-    if not os.path.exists(_AUTH_SECRETS_FILE):
-        token_present = False
-        mtime_str     = None
-        age_str       = None
-    else:
+    if os.path.exists(_AUTH_SECRETS_FILE) and os.path.getsize(_AUTH_SECRETS_FILE) > 2:
         with open(_AUTH_SECRETS_FILE, 'r', encoding='utf-8') as f:
-            secrets = json.load(f) if os.path.getsize(_AUTH_SECRETS_FILE) > 2 else {}
+            try:
+                secrets = json.load(f)
+            except json.JSONDecodeError:
+                pass
         token_present = bool(secrets.get('aas_token'))
         mtime         = datetime.fromtimestamp(os.path.getmtime(_AUTH_SECRETS_FILE))
-        mtime_str     = mtime.strftime('%Y-%m-%d %H:%M:%S')
-        delta         = datetime.now() - mtime
-        days          = delta.days
-        hours         = delta.seconds // 3600
-        minutes       = (delta.seconds % 3600) // 60
-        age_str       = f"{days}j {hours}h {minutes}min" if days else f"{hours}h {minutes}min"
 
-    # --- build email ---
+        expires_in = (secrets
+                      .get('fcm_credentials', {})
+                      .get('fcm', {})
+                      .get('installation', {})
+                      .get('expires_in'))
+        if mtime and expires_in:
+            from datetime import timedelta
+            fcm_exp       = mtime + timedelta(seconds=int(expires_in))
+            fcm_days_left = (fcm_exp - datetime.now()).days
+
+    # --- formatted strings ---
+    mtime_str   = mtime.strftime('%Y-%m-%d %H:%M:%S')   if mtime   else None
+    fcm_exp_str = fcm_exp.strftime('%Y-%m-%d %H:%M:%S') if fcm_exp else None
+    delta       = datetime.now() - mtime if mtime else None
+    age_str     = None
+    if delta:
+        d, h, m = delta.days, delta.seconds // 3600, (delta.seconds % 3600) // 60
+        age_str = f"{d}j {h}h {m}min" if d else f"{h}h {m}min"
+
+    # --- alert level ---
     if expired:
-        level   = 'error'
-        status_line = "EXPIRÉ — ré-authentification requise"
+        level, status_line = 'error',   'EXPIRÉ — ré-authentification requise'
     elif not token_present:
-        level   = 'warning'
-        status_line = "ABSENT — aucun token dans secrets.json"
+        level, status_line = 'warning', 'ABSENT — aucun token dans secrets.json'
+    elif fcm_days_left is not None and fcm_days_left <= 3:
+        level, status_line = 'warning', f'VALIDE — token FCM expire dans {fcm_days_left}j'
     else:
-        level   = 'success'
-        status_line = "VALIDE"
+        level, status_line = 'success', 'VALIDE'
 
-    body_lines = [
-        f"État du token AAS : {status_line}",
+    # --- email body ---
+    sep = '─' * 48
+    lines = [
+        f"Rapport généré le {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "",
+        sep,
+        "  TOKEN AAS  (authentification Google)",
+        sep,
+        f"  Statut            : {'⚠ EXPIRÉ' if expired else ('✗ Absent' if not token_present else '✓ Valide')}",
     ]
     if mtime_str:
-        body_lines += [
-            f"Dernière mise à jour  : {mtime_str}",
-            f"Âge du token          : {age_str}",
+        lines += [
+            f"  Dernière mise à jour : {mtime_str}",
+            f"  Âge                  : {age_str}",
+        ]
+    lines += [
+        "",
+        sep,
+        "  TOKEN FCM  (installation Firebase)",
+        sep,
+    ]
+    if fcm_exp_str:
+        if fcm_days_left is not None and fcm_days_left < 0:
+            fcm_status = "✗ Expiré"
+        elif fcm_days_left is not None and fcm_days_left <= 3:
+            fcm_status = f"⚠ Expire dans {fcm_days_left}j"
+        else:
+            fcm_status = f"✓ Valide ({fcm_days_left}j restants)"
+        lines += [
+            f"  Statut            : {fcm_status}",
+            f"  Expiration        : {fcm_exp_str}",
+            f"    (= dernière mise à jour + {secrets.get('fcm_credentials',{}).get('fcm',{}).get('installation',{}).get('expires_in',0) // 86400}j)",
         ]
     else:
-        body_lines.append("Fichier Auth/secrets.json introuvable.")
-    body_lines += [
+        lines.append("  Non disponible")
+    lines += [
         "",
-        "Actions disponibles :",
-        "  • Renouveler le token  → PUT /auth/aas-token",
-        "  • Remplacer le fichier → PUT /auth/secrets",
-        f"\nHorodatage : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        sep,
+        "  ACTIONS",
+        sep,
+        "  PUT /auth/aas-token  → renouveler le token AAS seul",
+        "  PUT /auth/secrets    → remplacer le fichier complet",
     ]
 
     send_notification(
-        subject=f"FineTrack — Statut du token Google ({status_line})",
-        body='\n'.join(body_lines),
+        subject=f"FineTrack — Statut du token : {status_line}",
+        body='\n'.join(lines),
         alert_level=level,
     )
     logger.info(f"[auth] token-status email sent — {status_line}")
 
-    result = {
-        'status':        'expired' if expired else ('absent' if not token_present else 'ok'),
-        'token_present': token_present,
-        'last_updated':  mtime_str,
-        'age':           age_str,
-    }
-    return jsonify(result)
+    return jsonify({
+        'status':          'expired' if expired else ('absent' if not token_present else 'ok'),
+        'token_present':   token_present,
+        'last_updated':    mtime_str,
+        'age':             age_str,
+        'fcm_token_exp':   fcm_exp_str,
+        'fcm_days_left':   fcm_days_left,
+    })
 
 
 @app.route('/notify/test', methods=['POST'])
