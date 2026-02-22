@@ -17,13 +17,12 @@ services:
     container_name: traccar-sync
     ports:
       - "${PORT:-5002}:${PORT:-5002}"
+    env_file:
+      - .env                          # loads all variables (SMTP, API_TOKEN, …)
     environment:
-      # URL of your Traccar server – override in .env or with -e
+      # Defaults applied only when the variable is absent from .env
       TRACCAR_SERVER_URL: "${TRACCAR_SERVER_URL:-http://traccar:8082}"
       PORT: "${PORT:-5002}"
-      # Bearer token for API authentication – leave empty to disable
-      API_TOKEN: "${API_TOKEN:-}"
-      # Auto-registration settings
       AUTO_REGISTER_SERVICES: "${AUTO_REGISTER_SERVICES:-true}"
       AUTO_REGISTER_TIMER: "${AUTO_REGISTER_TIMER:-600}"
       AUTO_REGISTER_DELTA: "${AUTO_REGISTER_DELTA:-5}"
