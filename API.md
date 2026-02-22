@@ -531,6 +531,13 @@ NopaApiExtend.get_location_data_for_device_extended()
         ▼
    service.py  (Flask, port 5002)
         │
+        ├── GET    /health                        → liveness probe (200 ok / 503 auth_required)
+        ├── GET    /versions                      → service version + build date
+        │
+        ├── PUT    /auth/secrets                  → upload full secrets.json (first-time setup)
+        ├── PUT    /auth/aas-token                → renew expired aas_token only
+        ├── POST   /notify/test                   → send SMTP test email
+        │
         ├── GET  /devices                         → list trackers
         ├── GET  /devices/<id>/locations          → all locations
         ├── GET  /devices/<id>/locations?last     → most recent location
@@ -551,9 +558,10 @@ NopaApiExtend.get_location_data_for_device_extended()
         └── DELETE /excluded-devices/<id>         → remove from exclusion list
                 │
                 ▼
-          ../Data/locations.json         (MD5 hashes per device)
-          ../Data/locations.log          (NDJSON push log — one line per Traccar push attempt)
-          ../Data/services.json          (sync services — also written by auto-register thread)
-          ../Data/devices.json           (cached device list, refreshed hourly)
-          ../Data/excluded_devices.json  (device IDs excluded from auto-registration)
+          ../data/locations.json         (MD5 hashes per device)
+          ../data/locations.log          (NDJSON push log — one line per Traccar push attempt)
+          ../data/services.json          (sync services — also written by auto-register thread)
+          ../data/devices.json           (cached device list, refreshed hourly)
+          ../data/excluded_devices.json  (device IDs excluded from auto-registration)
+          ../data/secrets.json           (Google credentials — bind-mounted from host)
 ```
