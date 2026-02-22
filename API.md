@@ -227,9 +227,12 @@ curl -X PUT http://localhost:5002/auth/secrets \
 
 #### `POST /auth/token-status`
 
-Envoie un email indiquant l'état et l'âge du token AAS actuellement en cache.
-L'âge est calculé à partir de la date de modification de `Auth/secrets.json`
-(= dernière fois que le token a été généré ou mis à jour).
+Envoie un email et retourne un rapport JSON sur l'état des deux tokens en cache :
+
+- **Token AAS** : présence et âge (depuis la date de modification de `secrets.json`)
+- **Token FCM** : expiration calculée comme `mtime(secrets.json) + expires_in`
+
+Le niveau d'alerte de l'email est `warning` si le token FCM expire dans ≤ 3 jours.
 
 **Response** – objet JSON
 
@@ -237,14 +240,16 @@ L'âge est calculé à partir de la date de modification de `Auth/secrets.json`
 {
   "status":        "ok",
   "token_present": true,
-  "last_updated":  "2026-02-01 14:32:00",
-  "age":           "21j 3h 12min"
+  "last_updated":  "2026-02-18 14:30:00",
+  "age":           "4j 2h 15min",
+  "fcm_token_exp": "2026-02-25 16:42:53",
+  "fcm_days_left": 7
 }
 ```
 
 | `status` | Signification |
 | --- | --- |
-| `ok` | Token présent et non marqué expiré |
+| `ok` | Token AAS présent et non expiré |
 | `expired` | `GET /health` retourne `503 auth_required` |
 | `absent` | Fichier absent ou `aas_token` manquant dans `secrets.json` |
 
@@ -507,10 +512,14 @@ whose device appears in the exclusion list (e.g. a device excluded while the ser
 startup
   ├─ start devices-refresh thread      (fetches devices.json immediately, then every 3600 s)
   ├─ load services.json                → start one sync thread per registered device
-  └─ start auto-register thread
-          ├─ wait 5 s                  (lets devices-refresh complete its first fetch)
-          ├─ register new devices      (skips excluded and already-registered ones)
-          ├─ wait 600 s
+  ├─ start auto-register thread
+  │       ├─ wait 5 s                  (lets devices-refresh complete its first fetch)
+  │       ├─ register new devices      (skips excluded and already-registered ones)
+  │       ├─ wait 600 s
+  │       └─ (loop)
+  └─ start token-watch thread
+          ├─ check FCM expiry          (mtime + expires_in; email if ≤ 24h remaining)
+          ├─ wait 3600 s
           └─ (loop)
 ```
 
@@ -537,11 +546,16 @@ startup
   │       ├─ wait 3600 s
   │       └─ (loop)
   │
-  └─ load services.json
-       └─ for each entry → start background sync thread
-                               ├─ sync immediately
-                               ├─ wait timer ± random(delta) seconds
-                               └─ (loop)
+  ├─ load services.json
+  │    └─ for each entry → start background sync thread
+  │                            ├─ sync immediately
+  │                            ├─ wait timer ± random(delta) seconds
+  │                            └─ (loop)
+  │
+  └─ start token-watch thread
+          ├─ check FCM expiry (mtime + expires_in; email warning if ≤ 24h)
+          ├─ wait 3600 s
+          └─ (loop)
 ```
 
 A `DELETE /devices/<device_id>/services` stops the thread and removes the

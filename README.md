@@ -46,7 +46,8 @@ to your Traccar instance.
 - **Persistent state** – sync services and synced-location hashes survive restarts; all data files are created automatically on first use.
 - **Push audit log** – every Traccar push attempt (success or failure) is appended as a JSON line to `Data/locations.log`, including the HTTP response status and the `loc_status` indicator from the Google decryption layer.
 - **Auto-registration** – at startup and every 10 minutes, the service automatically registers a sync service for every discovered device not present in `Data/excluded_devices.json`; managed via the `/excluded-devices` CRUD API; can be disabled globally via `AUTO_REGISTER_SERVICES=false`.
-- **Email notifications** – optional SMTP notifications (via Python `smtplib`) for three events: Google OAuth token expiry, new device detected in `devices.json`, new device auto-registered for sync. Configured via `NOTIFY_SMTP_*` environment variables; entirely disabled when `NOTIFY_SMTP_HOST` is unset.
+- **Email notifications** – optional SMTP notifications (via Python `smtplib`) for four events: Google OAuth token expiry, FCM installation token expiry (J-1 automatic warning), new device detected in `devices.json`, new device auto-registered for sync. Configured via `NOTIFY_SMTP_*` environment variables; entirely disabled when `NOTIFY_SMTP_HOST` is unset.
+- **FCM token expiry watch** – a dedicated background thread checks the Firebase installation token expiry every hour (`mtime(secrets.json) + expires_in`) and sends a `warning` email automatically when fewer than 24 hours remain; deduplicates to one notification per expiry date.
 - **Authentication failure handling** – when the Google OAuth token expires (`KeyError: 'Auth'`), all background sync threads stop gracefully, the expired `aas_token` is removed from `Auth/secrets.json`, an email is sent, and `/health` returns `503 auth_required` until the service is restarted.
 - **Flexible deployment** – ships as a self-contained Docker Compose stack or runs directly in a plain Python virtual environment.
 
@@ -258,7 +259,26 @@ Log attendu en cas de succès :
 
 ---
 
-## Gestion de l'expiration du token Google OAuth
+## Gestion de l'expiration des tokens Google
+
+### Token FCM (Firebase installation) — expiration automatique J-1
+
+Le token d'installation Firebase a une durée de validité limitée (`expires_in` dans `secrets.json`).
+Un thread de surveillance vérifie toutes les heures si l'expiration approche :
+
+- **Calcul** : `date de modification de secrets.json + expires_in (secondes)`
+- **Déclenchement** : email `warning` envoyé automatiquement quand il reste ≤ 24h
+- **Déduplication** : un seul email par date d'expiration
+
+Pour vérifier manuellement l'état et l'âge des deux tokens :
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:5001/auth/token-status
+# → {"status": "ok", "token_present": true, "last_updated": "...", "age": "...",
+#    "fcm_token_exp": "2026-02-25 16:42:53", "fcm_days_left": 3}
+```
+
+### Token AAS (authentification Google) — expiration détectée à l'usage
 
 Le token `aas_token` mis en cache dans `Auth/secrets.json` a une durée de vie limitée.
 Quand Google le rejette, le service détecte l'erreur `KeyError: 'Auth'` et :
