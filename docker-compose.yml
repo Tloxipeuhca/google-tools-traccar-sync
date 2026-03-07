@@ -34,4 +34,6 @@ services:
       - ./data:/app/Data
       # Log files
       - ./logs:/app/logs
+      # .env file available inside the Traccar module directory
+      - ./.env:/app/Traccar/.env
     restart: unless-stopped
