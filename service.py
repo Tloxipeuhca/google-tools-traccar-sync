@@ -20,6 +20,7 @@ import logging
 import threading
 import argparse
 from datetime import date, datetime, timedelta
+from logging.handlers import TimedRotatingFileHandler
 
 import requests
 from flask import Flask, jsonify, request as flask_request
@@ -73,13 +74,13 @@ def _setup_logging() -> logging.Logger:
     log_dir = os.path.join(_PROJECT_ROOT, 'logs')
     os.makedirs(log_dir, exist_ok=True)
 
-    log_file = os.path.join(log_dir, f"{date.today().strftime('%Y-%m-%d')}_service.log")
+    log_file = os.path.join(log_dir, 'service.log')
 
     _fmt     = '%(asctime)s.%(msecs)03d [%(levelname)-8s] %(message)s'
     _datefmt = '%Y-%m-%d %H:%M:%S'
 
-    # File handler – plain text, UTF-8
-    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    # File handler – rotates daily at midnight, keeps 30 backups, UTF-8
+    file_handler = TimedRotatingFileHandler(log_file, when='midnight', interval=1, backupCount=30, encoding='utf-8')
     file_handler.setFormatter(logging.Formatter(fmt=_fmt, datefmt=_datefmt))
 
     # Console handler – colored output, UTF-8 for Windows compatibility
