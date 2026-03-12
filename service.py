@@ -14,6 +14,7 @@ import sys
 import os
 import io
 import json
+import math
 import random
 import hashlib
 import logging
@@ -135,6 +136,20 @@ _API_TOKEN: str | None = os.environ.get('API_TOKEN') or None
 _AUTO_REGISTER: bool = os.environ.get('AUTO_REGISTER_SERVICES', 'true').strip().lower() not in ('0', 'false', 'no')
 _AUTO_REGISTER_TIMER: int = int(os.environ.get('AUTO_REGISTER_TIMER', '120'))
 _AUTO_REGISTER_DELTA: int = int(os.environ.get('AUTO_REGISTER_DELTA', '5'))
+
+# ---------------------------------------------------------------------------
+# Smart tracking config – read once at startup from environment
+# ---------------------------------------------------------------------------
+# Enable/disable intelligent adaptive interval tracking
+_SMART_TRACKING_ENABLED: bool  = os.environ.get('SMART_TRACKING_ENABLED', 'true').strip().lower() not in ('0', 'false', 'no')
+# Distance threshold (metres) that triggers intensive mode
+_SMART_TRACKING_DISTANCE: float = float(os.environ.get('SMART_TRACKING_DISTANCE', '200'))
+# Duration (seconds) of the intensive tracking window after a move is detected
+_SMART_TRACKING_DURATION: int   = int(os.environ.get('SMART_TRACKING_DURATION', '300'))
+# Polling interval (seconds) used during intensive mode
+_SMART_TRACKING_TIMER: int      = int(os.environ.get('SMART_TRACKING_TIMER', '20'))
+# Jitter (± seconds) applied to the intensive-mode interval
+_SMART_TRACKING_DELTA: int      = int(os.environ.get('SMART_TRACKING_DELTA', '5'))
 
 
 @app.before_request
@@ -426,6 +441,17 @@ _service_next_sync:   dict[str, float | None]     = {}
 _auth_needs_reauth: bool         = False
 _auth_lock:         threading.Lock = threading.Lock()
 
+# ---------------------------------------------------------------------------
+# Smart tracking state  { device_id -> value }
+# ---------------------------------------------------------------------------
+# Timestamp (float) at which intensive mode ends; 0 = not active
+_smart_tracking_end:      dict[str, float] = {}
+# Last known position used for displacement comparison
+_smart_tracking_last_lat: dict[str, float] = {}
+_smart_tracking_last_lon: dict[str, float] = {}
+# Normal polling timer per device — used as re-trigger window (set in _start_device_service)
+_service_timer:           dict[str, int]   = {}
+
 
 # ---------------------------------------------------------------------------
 # File helpers
@@ -544,6 +570,66 @@ def _load_device_name(device_id: str) -> str | None:
 # ---------------------------------------------------------------------------
 # Location helpers
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Smart tracking helpers
+# ---------------------------------------------------------------------------
+
+def _haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Returns the great-circle distance in metres between two GPS coordinates."""
+    R = 6_371_000  # Earth radius in metres
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlam = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _check_smart_tracking(device_id: str, location: dict) -> None:
+    """
+    Compares *location* against the last known position for *device_id*.
+    If displacement exceeds _SMART_TRACKING_DISTANCE metres, activates (or
+    resets) the intensive-tracking window for _SMART_TRACKING_DURATION seconds.
+    A new movement detected within _SMART_TRACKING_RETRIGGER_WINDOW seconds of
+    the previous trigger also resets the window, so the device is tracked
+    intensively for as long as it keeps moving.
+    Always updates the stored last-known position.
+    """
+    if not _SMART_TRACKING_ENABLED:
+        return
+    lat, lon = location['lat'], location['lon']
+    tag = f"[smart-tracking] {device_id}"
+
+    if device_id in _smart_tracking_last_lat:
+        dist = _haversine_distance(
+            _smart_tracking_last_lat[device_id],
+            _smart_tracking_last_lon[device_id],
+            lat, lon,
+        )
+        now = datetime.now().timestamp()
+        intensive_end    = _smart_tracking_end.get(device_id, 0)
+        intensive_active = now < intensive_end
+        # Re-trigger window = the device's own normal polling timer (no extra param needed)
+        retrigger_window = _service_timer.get(device_id, _AUTO_REGISTER_TIMER)
+        retrigger_eligible = not intensive_active and (now - intensive_end) < retrigger_window
+
+        if dist > _SMART_TRACKING_DISTANCE:
+            _smart_tracking_end[device_id] = now + _SMART_TRACKING_DURATION
+            if intensive_active or retrigger_eligible:
+                logger.info(
+                    f"{tag} Movement {dist:.0f}m detected — intensive window reset "
+                    f"(+{_SMART_TRACKING_DURATION}s, interval={_SMART_TRACKING_TIMER}s±{_SMART_TRACKING_DELTA}s)"
+                )
+            else:
+                logger.info(
+                    f"{tag} Movement {dist:.0f}m > {_SMART_TRACKING_DISTANCE}m — "
+                    f"intensive mode activated for {_SMART_TRACKING_DURATION}s "
+                    f"(interval={_SMART_TRACKING_TIMER}s±{_SMART_TRACKING_DELTA}s)"
+                )
+
+    _smart_tracking_last_lat[device_id] = lat
+    _smart_tracking_last_lon[device_id] = lon
+
 
 def _compute_location_hash(location: dict) -> str:
     """Returns the MD5 hash of a location resource (id+lat+lon+timestamp)."""
@@ -928,6 +1014,10 @@ def _sync_device(device_id: str, name: str) -> None:
     logger.info(f"{tag} Cycle starting...")
     locations = _fetch_device_locations(device_id)
     logger.info(f"{tag} {len(locations)} location(s) fetched from Google Find My")
+    # Smart tracking: compare most-recent location against last known position
+    if locations:
+        most_recent = max(locations, key=lambda x: x['timestamp'])
+        _check_smart_tracking(device_id, most_recent)
     new_locations = _get_new_locations(device_id, locations)
     logger.info(f"{tag} {len(new_locations)} new (not yet synced to Traccar)")
     synced = 0
@@ -978,6 +1068,7 @@ def _stop_all_device_services() -> None:
         _service_stop_events.pop(did, None)
         _service_last_sync.pop(did, None)
         _service_next_sync.pop(did, None)
+        _service_timer.pop(did, None)
     logger.warning(f"[auth] {len(device_ids)} sync service(s) stopped")
 
 
@@ -1029,10 +1120,21 @@ def _run_device_service(device_id: str, name: str, timer: int, delta: int, stop_
             logger.error(f"{tag} Unhandled error in cycle #{cycle}: {exc}")
         except Exception as exc:
             logger.error(f"{tag} Unhandled error in cycle #{cycle}: {exc}")
-        jitter = random.uniform(-delta, delta)
-        wait   = max(0, timer + jitter)
-        _service_next_sync[device_id] = datetime.now().timestamp() + wait
-        logger.info(f"{tag} Sleeping {wait:.1f}s (base={timer}s jitter={jitter:+.1f}s)")
+        # Smart tracking: use reduced interval if intensive mode is active
+        now = datetime.now().timestamp()
+        intensive_end = _smart_tracking_end.get(device_id, 0)
+        if _SMART_TRACKING_ENABLED and now < intensive_end:
+            effective_timer = _SMART_TRACKING_TIMER
+            effective_delta = _SMART_TRACKING_DELTA
+            remaining = intensive_end - now
+            logger.info(f"{tag} [smart-tracking] Intensive mode — {remaining:.0f}s remaining")
+        else:
+            effective_timer = timer
+            effective_delta = delta
+        jitter = random.uniform(-effective_delta, effective_delta)
+        wait   = max(0, effective_timer + jitter)
+        _service_next_sync[device_id] = now + wait
+        logger.info(f"{tag} Sleeping {wait:.1f}s (base={effective_timer}s jitter={jitter:+.1f}s)")
         if stop_event.wait(wait):
             logger.info(f"{tag} Stop signal received during sleep, exiting thread")
             break
@@ -1052,6 +1154,7 @@ def _start_device_service(device_id: str, name: str, timer: int, delta: int = 5)
     _service_stop_events[device_id] = stop_event
     _service_last_sync[device_id]   = None
     _service_next_sync[device_id]   = None
+    _service_timer[device_id]       = timer
     thread.start()
     logger.info(f"[service:{device_id}] Started — interval={timer}s delta=±{delta}s, thread={thread.name}")
 
@@ -1065,6 +1168,7 @@ def _stop_device_service(device_id: str) -> None:
         _service_stop_events.pop(device_id, None)
         _service_last_sync.pop(device_id, None)
         _service_next_sync.pop(device_id, None)
+        _service_timer.pop(device_id, None)
         logger.info(f"[service:{device_id}] Stopped and removed")
 
 

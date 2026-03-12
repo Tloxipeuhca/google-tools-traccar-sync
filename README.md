@@ -39,6 +39,7 @@ to your Traccar instance.
 ## Features
 
 - **Automatic periodic sync** – register a sync service per device; a background thread runs the full pipeline (fetch → filter → push) on a configurable schedule with random jitter to avoid API rate bursts.
+- **Smart tracking (adaptive interval)** – when a device moves more than 200 m (configurable), the polling interval automatically drops to 20 s ± 5 s for 5 minutes (configurable). Any new movement detected during that window resets the 5-minute timer, keeping intensive polling active for as long as the device is moving. Enabled by default; fully configurable via `SMART_TRACKING_*` variables.
 - **Deduplication** – locations are fingerprinted with MD5 hashes stored in `Data/locations.json`; already-synced positions are never pushed twice to Traccar.
 - **REST API** – a Flask service exposes endpoints to list devices, query locations, manage sync services, and trigger one-off manual pushes.
 - **Bearer token authentication** – all endpoints are optionally protected by a configurable `API_TOKEN`; unset the variable to run in dev mode without auth.
@@ -130,6 +131,11 @@ docker compose down         # stop
 | `AUTO_REGISTER_SERVICES` | `true` | Enable automatic sync service registration for all devices |
 | `AUTO_REGISTER_TIMER` | `600` | Sync interval (seconds) applied when auto-registering |
 | `AUTO_REGISTER_DELTA` | `5` | Jitter (seconds) applied when auto-registering |
+| `SMART_TRACKING_ENABLED` | `true` | Enable adaptive interval tracking (intensive mode on movement) |
+| `SMART_TRACKING_DISTANCE` | `200` | Distance threshold (metres) that triggers intensive mode |
+| `SMART_TRACKING_DURATION` | `300` | Duration (seconds) of the intensive tracking window |
+| `SMART_TRACKING_TIMER` | `20` | Polling interval (seconds) used during intensive mode |
+| `SMART_TRACKING_DELTA` | `5` | Jitter (± seconds) applied to the intensive-mode interval |
 | `NOTIFY_SMTP_HOST` | *(empty)* | SMTP server hostname — **leave empty to disable all notifications** |
 | `NOTIFY_SMTP_PORT` | `587` | SMTP port (`587` for STARTTLS, `465` for SSL) |
 | `NOTIFY_SMTP_USER` | *(empty)* | SMTP login username |

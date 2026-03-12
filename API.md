@@ -549,7 +549,12 @@ startup
   ├─ load services.json
   │    └─ for each entry → start background sync thread
   │                            ├─ sync immediately
-  │                            ├─ wait timer ± random(delta) seconds
+  │                            │     └─ compare latest location against last known position
+  │                            │           └─ displacement > SMART_TRACKING_DISTANCE?
+  │                            │                 └─ YES → activate/reset intensive window
+  │                            ├─ intensive mode active?
+  │                            │     ├─ YES → wait SMART_TRACKING_TIMER ± SMART_TRACKING_DELTA s
+  │                            │     └─ NO  → wait timer ± delta s
   │                            └─ (loop)
   │
   └─ start token-watch thread
@@ -560,6 +565,50 @@ startup
 
 A `DELETE /devices/<device_id>/services` stops the thread and removes the
 entry from `services.json`.
+
+---
+
+## Smart tracking (adaptive interval)
+
+The smart tracking feature automatically reduces the polling interval when a
+device is detected to be moving, providing higher location resolution during
+trips without wasting Google Find My API calls when the device is stationary.
+
+### How it works
+
+1. After each sync cycle, the most recent location is compared against the
+   last known position for that device using the **Haversine formula**.
+2. If the displacement exceeds `SMART_TRACKING_DISTANCE` metres (default **200 m**),
+   an *intensive tracking window* opens for `SMART_TRACKING_DURATION` seconds
+   (default **5 minutes**).
+3. During the intensive window, the polling interval drops to
+   `SMART_TRACKING_TIMER ± SMART_TRACKING_DELTA` seconds (default **20 s ± 5 s**).
+4. Any new displacement > threshold detected **during the window, or within
+   one normal polling cycle after it ends** (i.e. within `timer` seconds — no
+   extra parameter needed), **resets the 5-minute timer**, keeping intensive
+   polling active for as long as the device keeps moving.
+5. Once the window expires and no new movement is detected, the thread reverts
+   to the normal `timer ± delta` interval configured for that service.
+
+### Configuration
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `SMART_TRACKING_ENABLED` | `true` | Set to `false` to disable the feature entirely |
+| `SMART_TRACKING_DISTANCE` | `200` | Displacement threshold (metres) that triggers intensive mode |
+| `SMART_TRACKING_DURATION` | `300` | Length (seconds) of the intensive tracking window |
+| `SMART_TRACKING_TIMER` | `20` | Polling interval (seconds) during intensive mode |
+| `SMART_TRACKING_DELTA` | `5` | Jitter (± seconds) applied to the intensive-mode interval |
+
+### Logs
+
+Intensive mode transitions are logged at `INFO` level:
+
+```text
+[smart-tracking] <device_id> Movement 350m > 200m — intensive mode activated for 300s (interval=20s±5s)
+[smart-tracking] <device_id> Movement 280m detected — intensive window reset (+300s, interval=20s±5s)
+[service] MyDevice (<id>) [smart-tracking] Intensive mode — 187s remaining
+```
 
 ---
 
